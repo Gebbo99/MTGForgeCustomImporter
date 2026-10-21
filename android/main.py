@@ -458,11 +458,24 @@ class SettingsPopup(Popup):
         box.add_widget(buttons)
 
     def _autodetect(self) -> None:
-        detected = android_env.default_settings()
+        try:
+            if android_env.IS_ANDROID and not android_env.has_all_files_access():
+                android_env.request_storage_access()
+                self.app._show_status(t("status.storage_access_needed"), COLOR_WARN)
+                return
+            detected = android_env.default_settings()
+        except Exception as exc:  # pragma: no cover - dipende dall'ambiente
+            self.app._show_status(f"{t('status.forge_missing')} ({exc})", COLOR_BAD)
+            return
+
+        updated = False
         for key, field_ in self.fields.items():
             value = getattr(detected, key)
             if value:
                 field_.text = value
+                updated = True
+        if not updated:
+            self.app._show_status(t("status.forge_missing"), COLOR_WARN)
 
     def _save(self) -> None:
         for key, field_ in self.fields.items():

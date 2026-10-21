@@ -33,6 +33,13 @@ FORGE_ROOT_CANDIDATES = (
     "/sdcard/Forge",
 )
 
+FORGE_SCAN_BASES = (
+    "/storage/emulated/0/Android/obb",
+    "/storage/emulated/0/Android/data",
+    "/sdcard/Android/obb",
+    "/sdcard/Android/data",
+)
+
 
 def has_all_files_access() -> bool:
     """Vero se il permesso "Accesso a tutti i file" e' gia' concesso."""
@@ -85,19 +92,53 @@ def request_storage_access() -> None:
 
 def _first_existing(candidates: list[Path]) -> Path | None:
     for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
+        try:
+            if candidate.is_dir():
+                return candidate
+        except OSError:
+            continue
     return None
 
 
 def _looks_like_forge(root: Path) -> bool:
-    return P.card_db_path(root) is not None
+    try:
+        return P.card_db_path(root) is not None
+    except OSError:
+        return False
+
+
+def _iter_forge_candidates() -> list[Path]:
+    """Percorsi plausibili di Forge su Android, inclusi package name variabili."""
+    seen: set[str] = set()
+    ordered: list[Path] = []
+
+    def add(path: Path) -> None:
+        key = str(path).lower()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(path)
+
+    for raw in FORGE_ROOT_CANDIDATES:
+        add(Path(raw))
+
+    for raw in FORGE_SCAN_BASES:
+        base = Path(raw)
+        try:
+            for package_dir in base.iterdir():
+                if not package_dir.is_dir():
+                    continue
+                add(package_dir / "Forge")
+                add(package_dir / "files" / "Forge")
+                add(package_dir / "files")
+                add(package_dir)
+        except OSError:
+            continue
+    return ordered
 
 
 def find_forge_root() -> Path | None:
     """Cerca l'installazione Android di Forge fra i percorsi noti."""
-    roots = [Path(p) for p in FORGE_ROOT_CANDIDATES]
-    for root in roots:
+    for root in _iter_forge_candidates():
         if _looks_like_forge(root):
             return root
         # la cartella dati puo' stare in una sottocartella (es. .../files/Forge)
@@ -114,8 +155,11 @@ def _custom_dir(root: Path) -> Path | None:
     """Cartella delle carte custom (contiene editions/ e cards/)."""
     candidates = [root / "data" / "custom", root / "custom", root / "data"]
     for candidate in candidates:
-        if (candidate / "editions").is_dir() or (candidate / "cards").is_dir():
-            return candidate
+        try:
+            if (candidate / "editions").is_dir() or (candidate / "cards").is_dir():
+                return candidate
+        except OSError:
+            continue
     return _first_existing(candidates) or root
 
 
@@ -123,19 +167,29 @@ def _cache_dir(root: Path) -> Path | None:
     """Cache immagini di Forge (contiene pics/cards/<CODICE>/)."""
     candidates = [root / "cache", root / "Cache", root / "data" / "cache"]
     for candidate in candidates:
-        if (candidate / "pics").is_dir():
-            return candidate
+        try:
+            if (candidate / "pics").is_dir():
+                return candidate
+        except OSError:
+            continue
     return _first_existing(candidates) or root
 
 
 def default_settings() -> P.Settings:
     """Impostazioni iniziali: percorsi Android rilevati automaticamente."""
     settings = P.Settings()
-    root = find_forge_root()
-    if root is not None:
-        settings.forge_root = str(root)
-        settings.custom_dir = str(_custom_dir(root))
-        settings.cache_dir = str(_cache_dir(root))
+    try:
+        root = find_forge_root()
+        if root is not None:
+            settings.forge_root = str(root)
+            custom_dir = _custom_dir(root)
+            cache_dir = _cache_dir(root)
+            if custom_dir is not None:
+                settings.custom_dir = str(custom_dir)
+            if cache_dir is not None:
+                settings.cache_dir = str(cache_dir)
+    except OSError:
+        pass
     return settings
 
 
