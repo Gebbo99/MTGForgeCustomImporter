@@ -138,6 +138,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.quick_paths": "Quick Forge paths",
         "settings.quick_obb": "Use Android/obb/forge.app/forge",
         "settings.quick_data": "Use Android/data/forge.app/files/forge",
+        "settings.saved_restart": "Settings saved. Close and reopen the app to apply language and paths safely.",
+        "settings.saved_status": "Settings saved.",
         # --- nuova edizione ---
         "edition.title": "New edition",
         "edition.code": "Code (e.g. MHW)",
@@ -294,6 +296,8 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.quick_paths": "Percorsi Forge rapidi",
         "settings.quick_obb": "Usa Android/obb/forge.app/forge",
         "settings.quick_data": "Usa Android/data/forge.app/files/forge",
+        "settings.saved_restart": "Impostazioni salvate. Chiudi e riapri l'app per applicare in sicurezza lingua e percorsi.",
+        "settings.saved_status": "Impostazioni salvate.",
         # --- nuova edizione ---
         "edition.title": "Nuova edizione",
         "edition.code": "Codice (es. MHW)",

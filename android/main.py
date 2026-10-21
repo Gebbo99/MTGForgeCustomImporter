@@ -404,7 +404,6 @@ class SettingsPopup(Popup):
     def __init__(self, app: "ImporterAppUI", **kwargs) -> None:
         super().__init__(title=t("settings.title"), size_hint=(0.95, 0.9), **kwargs)
         self.app = app
-        self._pending_settings_apply: tuple[str, bool] | None = None
         settings = app.settings
 
         box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(10))
@@ -482,6 +481,15 @@ class SettingsPopup(Popup):
         language_row.add_widget(self.language_spinner)
         box.add_widget(language_row)
 
+        self.save_status = MDLabel(
+            text="",
+            theme_text_color="Custom",
+            text_color=COLOR_OK,
+            size_hint_y=None,
+            height=dp(44),
+        )
+        box.add_widget(self.save_status)
+
         buttons = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
         buttons.add_widget(
             MDFlatButton(text=t("settings.autodetect"), on_release=self._autodetect)
@@ -551,33 +559,10 @@ class SettingsPopup(Popup):
             for key, field_ in self.fields.items():
                 setattr(self.app.settings, key, field_.text.strip())
             code = code_for_label(self.language_spinner.text)
-            language_changed = code != i18n.get_language()
             self.app.settings.language = code
             P.save_settings(self.app.settings)
-            self._pending_settings_apply = (code, language_changed)
-            self.dismiss()
-        except Exception as exc:  # pragma: no cover - dipende dall'ambiente
-            self.app._show_status(f"{t('common.error')}: {exc}", COLOR_BAD)
-
-    def on_dismiss(self) -> None:
-        pending = self._pending_settings_apply
-        self._pending_settings_apply = None
-        if pending is None:
-            return
-        Clock.schedule_once(
-            lambda _dt, lang=pending[0], changed=pending[1]: self._apply_saved_settings(
-                lang, changed
-            ),
-            0,
-        )
-
-    def _apply_saved_settings(self, language_code: str, language_changed: bool) -> None:
-        try:
-            if language_changed:
-                i18n.set_language(language_code)
-                self.app.rebuild_ui()
-            else:
-                self.app.after_settings_changed()
+            self.save_status.text = t("settings.saved_restart")
+            self.app._show_status(t("settings.saved_status"), COLOR_OK)
         except Exception as exc:  # pragma: no cover - dipende dall'ambiente
             self.app._show_status(f"{t('common.error')}: {exc}", COLOR_BAD)
 
