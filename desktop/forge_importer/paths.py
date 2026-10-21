@@ -96,13 +96,16 @@ def _drive_roots() -> list[Path]:
 def card_db_path(forge_root: Path) -> Path | None:
     """Restituisce la cartella o l'archivio dei card script ufficiali."""
     folder = forge_root / "res" / "cardsfolder"
-    if not folder.is_dir():
+    try:
+        if not folder.is_dir():
+            return None
+        archive = folder / "cardsfolder.zip"
+        if archive.is_file():
+            return archive
+        if any(folder.glob("**/*.txt")):
+            return folder
+    except OSError:
         return None
-    archive = folder / "cardsfolder.zip"
-    if archive.is_file():
-        return archive
-    if any(folder.glob("**/*.txt")):
-        return folder
     return None
 
 
@@ -201,10 +204,20 @@ class Settings:
             issues.append(t("paths.forge_missing"))
         elif card_db_path(root) is None:
             issues.append(t("paths.no_scripts", root=root))
-        if not self.resolved_custom_dir().is_dir():
-            issues.append(t("paths.custom_missing", dir=self.resolved_custom_dir()))
-        if not self.resolved_cache_dir().is_dir():
-            issues.append(t("paths.cache_missing", dir=self.resolved_cache_dir()))
+        custom_dir = self.resolved_custom_dir()
+        cache_dir = self.resolved_cache_dir()
+        try:
+            custom_ok = custom_dir.is_dir()
+        except OSError:
+            custom_ok = False
+        try:
+            cache_ok = cache_dir.is_dir()
+        except OSError:
+            cache_ok = False
+        if not custom_ok:
+            issues.append(t("paths.custom_missing", dir=custom_dir))
+        if not cache_ok:
+            issues.append(t("paths.cache_missing", dir=cache_dir))
         return issues
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Callable
 
 from forge_importer import paths as P
 
@@ -43,6 +44,20 @@ FORGE_SCAN_BASES = (
     "/sdcard/Android/obb",
     "/sdcard/Android/data",
 )
+
+FORGE_BROWSE_BASES = (
+    "/storage/emulated/0/Android/obb/forge.app",
+    "/storage/emulated/0/Android/obb",
+    "/storage/emulated/0/Android/data/forge.app/files",
+    "/storage/emulated/0/Android/data",
+    "/storage/emulated/0/Forge",
+    "/storage/emulated/0/forge",
+    "/sdcard/Forge",
+    "/sdcard/forge",
+)
+
+_TREE_PICK_REQUEST = 7417
+_pending_tree_callback: Callable[[Path], None] | None = None
 
 
 def has_all_files_access() -> bool:
@@ -111,6 +126,119 @@ def _looks_like_forge(root: Path) -> bool:
         return False
 
 
+def _tree_uri_to_path(uri) -> Path | None:
+    """Converte il tree URI Android in un path leggibile nel filesystem.
+
+    Per i percorsi di Forge ci interessa soprattutto lo storage primario:
+    `primary:Android/obb/forge.app/...` -> `/storage/emulated/0/Android/obb/...`
+    """
+    try:
+        from jnius import autoclass
+
+        DocumentsContract = autoclass("android.provider.DocumentsContract")
+        doc_id = str(DocumentsContract.getTreeDocumentId(uri) or "")
+    except Exception:
+        try:
+            doc_id = str(uri.getLastPathSegment() or "")
+        except Exception:
+            return None
+
+    if not doc_id:
+        return None
+
+    if doc_id.startswith("raw:"):
+        return Path(doc_id[4:])
+
+    volume, sep, relative = doc_id.partition(":")
+    if not sep:
+        relative = doc_id
+        volume = "primary"
+
+    relative = relative.lstrip("/")
+    if volume.lower() == "primary":
+        return Path("/storage/emulated/0") / relative if relative else Path("/storage/emulated/0")
+    return None
+
+
+def pick_android_tree(on_pick: Callable[[Path], None]) -> bool:
+    """Apre il picker cartelle nativo Android (SAF) per i path protetti.
+
+    Restituisce True se il picker e' stato aperto, False se non disponibile.
+    """
+    if not IS_ANDROID:
+        return False
+    try:
+        from android import activity
+        from jnius import autoclass
+        from kivy.clock import Clock
+
+        Activity = autoclass("android.app.Activity")
+        Intent = autoclass("android.content.Intent")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+
+        current_activity = PythonActivity.mActivity
+        flags = (
+            Intent.FLAG_GRANT_READ_URI_PERMISSION
+            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+            | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+        )
+
+        def on_activity_result(request_code, result_code, intent) -> None:
+            global _pending_tree_callback
+            if request_code != _TREE_PICK_REQUEST:
+                return
+            try:
+                activity.unbind(on_activity_result=on_activity_result)
+            except Exception:
+                pass
+            callback = _pending_tree_callback
+            _pending_tree_callback = None
+            if result_code != Activity.RESULT_OK or intent is None or callback is None:
+                return
+            try:
+                uri = intent.getData()
+                if uri is None:
+                    return
+                resolver = current_activity.getContentResolver()
+                resolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+                path = _tree_uri_to_path(uri)
+                if path is not None:
+                    Clock.schedule_once(lambda _dt: callback(path), 0)
+            except Exception:
+                return
+
+        _pending_tree_callback = on_pick
+        activity.bind(on_activity_result=on_activity_result)
+        intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+        intent.addFlags(flags)
+        current_activity.startActivityForResult(intent, _TREE_PICK_REQUEST)
+        return True
+    except Exception:
+        return False
+
+
+def _nearest_existing_dir(path: str) -> Path | None:
+    text = path.strip()
+    if not text:
+        return None
+    current = Path(text)
+    while True:
+        try:
+            if current.is_dir():
+                return current
+        except OSError:
+            pass
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
 def _iter_forge_candidates() -> list[Path]:
     """Percorsi plausibili di Forge su Android, inclusi package name variabili."""
     seen: set[str] = set()
@@ -159,6 +287,34 @@ def find_forge_root() -> Path | None:
     return None
 
 
+def resolve_forge_root(candidate: Path) -> Path | None:
+    """Normalizza una scelta manuale al vero root di Forge, se riconoscibile."""
+    probes = [
+        candidate,
+        candidate / "Forge",
+        candidate / "forge",
+        candidate / "files",
+        candidate / "files" / "Forge",
+        candidate / "files" / "forge",
+    ]
+    for probe in probes:
+        if _looks_like_forge(probe):
+            return probe
+    try:
+        for child in candidate.iterdir():
+            if not child.is_dir():
+                continue
+            if child.name.lower() in {"forge", "files"}:
+                for probe in (child, child / "Forge", child / "forge"):
+                    if _looks_like_forge(probe):
+                        return probe
+            if _looks_like_forge(child):
+                return child
+    except OSError:
+        pass
+    return None
+
+
 def _custom_dir(root: Path) -> Path | None:
     """Cartella delle carte custom (contiene editions/ e cards/)."""
     candidates = [root / "data" / "custom", root / "custom", root / "data"]
@@ -199,6 +355,35 @@ def default_settings() -> P.Settings:
     except OSError:
         pass
     return settings
+
+
+def settings_start_dir(key: str, current: str = "") -> str:
+    """Cartella iniziale piu' utile per il file picker delle impostazioni."""
+    current_dir = _nearest_existing_dir(current)
+    if current_dir is not None:
+        return str(current_dir)
+
+    if key == "forge_root":
+        candidates = [Path(path) for path in FORGE_BROWSE_BASES]
+    else:
+        root = find_forge_root()
+        candidates = []
+        if root is not None:
+            if key == "custom_dir":
+                candidates.extend([_custom_dir(root), root / "data", root])
+            elif key == "cache_dir":
+                candidates.extend([_cache_dir(root), root / "cache", root / "Cache", root])
+        candidates.extend(Path(path) for path in FORGE_BROWSE_BASES)
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            if candidate.is_dir():
+                return str(candidate)
+        except OSError:
+            continue
+    return picker_start_dir()
 
 
 def picker_start_dir() -> str:

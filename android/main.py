@@ -486,7 +486,13 @@ class SettingsPopup(Popup):
             self.app._show_status(t("status.forge_missing"), COLOR_WARN)
 
     def _browse_field(self, key: str) -> None:
-        start_path = self.fields[key].text.strip()
+        if key == "forge_root" and android_env.IS_ANDROID:
+            opened = android_env.pick_android_tree(
+                lambda path, target=key: self._set_field(target, path)
+            )
+            if opened:
+                return
+        start_path = android_env.settings_start_dir(key, self.fields[key].text.strip())
         FilePickerPopup(
             self.app,
             folder_mode=True,
@@ -496,21 +502,34 @@ class SettingsPopup(Popup):
         ).open()
 
     def _set_field(self, key: str, path: Path) -> None:
+        if key == "forge_root":
+            root = android_env.resolve_forge_root(path) or path
+            self.fields[key].text = str(root)
+            custom_dir = android_env._custom_dir(root)
+            cache_dir = android_env._cache_dir(root)
+            if custom_dir is not None and not self.fields["custom_dir"].text.strip():
+                self.fields["custom_dir"].text = str(custom_dir)
+            if cache_dir is not None and not self.fields["cache_dir"].text.strip():
+                self.fields["cache_dir"].text = str(cache_dir)
+            return
         self.fields[key].text = str(path)
 
     def _save(self) -> None:
-        for key, field_ in self.fields.items():
-            setattr(self.app.settings, key, field_.text.strip())
-        code = code_for_label(self.language_spinner.text)
-        language_changed = code != i18n.get_language()
-        self.app.settings.language = code
-        P.save_settings(self.app.settings)
-        self.dismiss()
-        if language_changed:
-            i18n.set_language(code)
-            self.app.rebuild_ui()
-        else:
-            self.app.after_settings_changed()
+        try:
+            for key, field_ in self.fields.items():
+                setattr(self.app.settings, key, field_.text.strip())
+            code = code_for_label(self.language_spinner.text)
+            language_changed = code != i18n.get_language()
+            self.app.settings.language = code
+            P.save_settings(self.app.settings)
+            self.dismiss()
+            if language_changed:
+                i18n.set_language(code)
+                self.app.rebuild_ui()
+            else:
+                self.app.after_settings_changed()
+        except Exception as exc:  # pragma: no cover - dipende dall'ambiente
+            self.app._show_status(f"{t('common.error')}: {exc}", COLOR_BAD)
 
 
 class NewEditionPopup(Popup):
@@ -804,35 +823,52 @@ class ImporterAppUI(MDApp):
 
     def rebuild_ui(self) -> None:
         """Ricostruisce l'interfaccia dopo un cambio di lingua."""
-        self._crop_value = self.crop_check.active
-        self._move_value = self.move_check.active
-        edition_choice = self.edition_spinner.text
+        try:
+            self._crop_value = self.crop_check.active
+            self._move_value = self.move_check.active
+            selected_edition = self._selected_edition()
+            selected_path = str(selected_edition.path) if selected_edition is not None else ""
+            edition_choice = self.edition_spinner.text
 
-        self.root_box.clear_widgets()
-        self.list_grid.clear_widgets()
-        self.cards.clear()
-        self._build_ui(self.root_box)
+            self.root_box.clear_widgets()
+            self.list_grid.clear_widgets()
+            self.cards.clear()
+            self._build_ui(self.root_box)
 
-        self.crop_check.active = self._crop_value
-        self.move_check.active = self._move_value
-        self.refresh_editions()
-        if edition_choice in self.edition_spinner.values:
-            self.edition_spinner.text = edition_choice
+            self.crop_check.active = self._crop_value
+            self.move_check.active = self._move_value
+            self.refresh_editions()
 
-        for row in self.rows.values():
-            self._render_row(row)
-        if self.db is not None:
-            self.show_ready()
-        else:
-            self.show_paths()
+            if selected_path:
+                for edition in self.editions:
+                    if str(edition.path) == selected_path:
+                        self.edition_spinner.text = f"{edition.code} - {edition.name}"
+                        break
+                else:
+                    if edition_choice in self.edition_spinner.values:
+                        self.edition_spinner.text = edition_choice
+            elif edition_choice in self.edition_spinner.values:
+                self.edition_spinner.text = edition_choice
+
+            for row in self.rows.values():
+                self._render_row(row)
+            if self.db is not None:
+                self.show_ready()
+            else:
+                self.show_paths()
+        except Exception as exc:  # pragma: no cover - dipende dall'ambiente
+            self._show_status(f"{t('common.error')}: {exc}", COLOR_BAD)
 
     def after_settings_changed(self) -> None:
-        self.show_paths()
-        self.refresh_editions()
-        self.db = None
-        self.matcher = None
-        self.token_matcher = None
-        self.start_db_load()
+        try:
+            self.show_paths()
+            self.refresh_editions()
+            self.db = None
+            self.matcher = None
+            self.token_matcher = None
+            self.start_db_load()
+        except Exception as exc:  # pragma: no cover - dipende dall'ambiente
+            self._show_status(f"{t('common.error')}: {exc}", COLOR_BAD)
 
     # -------------------------------------------------------------- stato
 
@@ -852,13 +888,16 @@ class ImporterAppUI(MDApp):
         )
 
     def show_paths(self) -> None:
-        problems = self.settings.problems()
-        if problems:
-            self._show_status("\u26a0 " + "  |  ".join(problems), COLOR_WARN)
-        else:
-            self._show_status(
-                t("status.forge_path", root=self.settings.forge_root), COLOR_OK
-            )
+        try:
+            problems = self.settings.problems()
+            if problems:
+                self._show_status("\u26a0 " + "  |  ".join(problems), COLOR_WARN)
+            else:
+                self._show_status(
+                    t("status.forge_path", root=self.settings.forge_root), COLOR_OK
+                )
+        except Exception as exc:  # pragma: no cover - dipende dall'ambiente
+            self._show_status(f"{t('common.error')}: {exc}", COLOR_BAD)
 
     def _set_busy(self, value: bool) -> None:
         self.busy = value
@@ -869,11 +908,14 @@ class ImporterAppUI(MDApp):
     def refresh_editions(self) -> None:
         editions_dir = self.settings.editions_dir()
         self.editions = []
-        if editions_dir.is_dir():
-            for file in sorted(editions_dir.glob("*.txt")):
-                edition = Edition.load(file)
-                if edition.code:
-                    self.editions.append(edition)
+        try:
+            if editions_dir.is_dir():
+                for file in sorted(editions_dir.glob("*.txt")):
+                    edition = Edition.load(file)
+                    if edition.code:
+                        self.editions.append(edition)
+        except OSError:
+            self.editions = []
         values = [f"{e.code} - {e.name}" for e in self.editions] + [t("common.new_edition")]
         self.edition_spinner.values = values
         if self.edition_spinner.text not in values:
