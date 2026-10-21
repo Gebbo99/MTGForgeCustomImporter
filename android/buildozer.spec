@@ -26,7 +26,9 @@ version = 1.0.0
 # rapidfuzz, opencv, onnxruntime e customtkinter non sono compilabili o utili
 # su Android: l'OCR e' ML Kit (sotto), il fuzzy matching usa il fallback puro
 # Python in forge_importer/_fuzzshim.py.
-requirements = python3, kivy==2.3.0, kivymd==1.2.0, pyjnius, pillow, android
+# Python viene fissato a 3.11 per evitare che python-for-android/Kivy usino
+# 3.14, che in CI rompe la compilazione delle estensioni C di Kivy.
+requirements = python3==3.11.9, kivy==2.3.0, kivymd==1.2.0, pyjnius, pillow, android
 
 orientation = portrait
 fullscreen = 0
