@@ -103,18 +103,34 @@ STATUS_COLORS = {"ok": COLOR_OK, "warn": COLOR_WARN, "bad": COLOR_BAD}
 IMAGE_FILTERS = ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.tif", "*.tiff"]
 
 
-def debug_log_path() -> Path:
-    return P.app_data_dir() / "android-debug.log"
+def debug_log_paths() -> list[Path]:
+    """Dove tenere il log diagnostico: cartella privata + cartella condivisa.
+
+    La cartella privata non e' raggiungibile dall'utente; se il telefono ha
+    concesso l'accesso alla memoria scriviamo anche in Download, cosi' il file
+    si puo' aprire con un qualsiasi gestore di file.
+    """
+    targets = [P.app_data_dir() / "android-debug.log"]
+    for base in ("/storage/emulated/0/Download", "/sdcard/Download"):
+        shared = Path(base)
+        try:
+            if shared.is_dir():
+                targets.append(shared / "ForgeCustomImporter" / "android-debug.log")
+                break
+        except OSError:
+            continue
+    return targets
 
 
 def log_debug(message: str) -> None:
-    try:
-        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        debug_log_path().parent.mkdir(parents=True, exist_ok=True)
-        with debug_log_path().open("a", encoding="utf-8") as handle:
-            handle.write(f"[{stamp}] {message}\n")
-    except Exception:
-        pass
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for target in debug_log_paths():
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with target.open("a", encoding="utf-8") as handle:
+                handle.write(f"[{stamp}] {message}\n")
+        except Exception:
+            pass
 
 
 def log_exception(context: str, exc: BaseException) -> None:
@@ -516,13 +532,13 @@ class SettingsPopup(Popup):
 
         buttons = BoxLayout(size_hint_y=None, height=dp(48), spacing=dp(8))
         buttons.add_widget(
-            MDFlatButton(text=t("settings.autodetect"), on_release=self._autodetect)
+            MDFlatButton(text=t("settings.autodetect"), on_release=lambda _w: self._autodetect())
         )
         buttons.add_widget(
             MDFlatButton(text=t("common.cancel"), on_release=lambda _w: self.dismiss())
         )
         buttons.add_widget(
-            MDRaisedButton(text=t("common.save"), on_release=self._save)
+            MDRaisedButton(text=t("common.save"), on_release=lambda _w: self._save())
         )
         box.add_widget(buttons)
 
@@ -597,10 +613,14 @@ class SettingsPopup(Popup):
             P.save_settings(self.app.settings)
             log_debug(f"settings saved to {P.settings_file()}")
             self.save_status.text = t("settings.saved_restart")
+            self.save_status.text_color = COLOR_OK
             self.app._show_status(t("settings.saved_status"), COLOR_OK)
             log_debug("settings save completed")
         except Exception as exc:  # pragma: no cover - dipende dall'ambiente
             log_exception("settings save failed", exc)
+            # L'errore va mostrato dentro il popup: lo stato dietro e' coperto.
+            self.save_status.text = f"{t('common.error')}: {exc}"
+            self.save_status.text_color = COLOR_BAD
             self.app._show_status(f"{t('common.error')}: {exc}", COLOR_BAD)
 
 
