@@ -436,6 +436,34 @@ class SettingsPopup(Popup):
             )
         )
 
+        if android_env.IS_ANDROID:
+            box.add_widget(
+                MDLabel(
+                    text=t("settings.quick_paths"),
+                    theme_text_color="Custom",
+                    text_color=COLOR_TEXT,
+                    size_hint_y=None,
+                    height=dp(28),
+                )
+            )
+            quick_paths = BoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None)
+            rows = [
+                android_env.FORGE_QUICK_CHOICES[index : index + 2]
+                for index in range(0, len(android_env.FORGE_QUICK_CHOICES), 2)
+            ]
+            quick_paths.height = dp(46 * max(1, len(rows)))
+            for pair in rows:
+                row = BoxLayout(size_hint_y=None, height=dp(40), spacing=dp(8))
+                for label_key, raw_path in pair:
+                    row.add_widget(
+                        MDFlatButton(
+                            text=t(label_key),
+                            on_release=lambda _w, target=raw_path: self._apply_quick_root(target),
+                        )
+                    )
+                quick_paths.add_widget(row)
+            box.add_widget(quick_paths)
+
         language_row = BoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
         language_row.add_widget(
             MDLabel(
@@ -507,12 +535,15 @@ class SettingsPopup(Popup):
             self.fields[key].text = str(root)
             custom_dir = android_env._custom_dir(root)
             cache_dir = android_env._cache_dir(root)
-            if custom_dir is not None and not self.fields["custom_dir"].text.strip():
+            if custom_dir is not None:
                 self.fields["custom_dir"].text = str(custom_dir)
-            if cache_dir is not None and not self.fields["cache_dir"].text.strip():
+            if cache_dir is not None:
                 self.fields["cache_dir"].text = str(cache_dir)
             return
         self.fields[key].text = str(path)
+
+    def _apply_quick_root(self, raw_path: str) -> None:
+        self._set_field("forge_root", Path(raw_path))
 
     def _save(self) -> None:
         try:
@@ -523,8 +554,19 @@ class SettingsPopup(Popup):
             self.app.settings.language = code
             P.save_settings(self.app.settings)
             self.dismiss()
+            Clock.schedule_once(
+                lambda _dt, lang=code, changed=language_changed: self._apply_saved_settings(
+                    lang, changed
+                ),
+                0,
+            )
+        except Exception as exc:  # pragma: no cover - dipende dall'ambiente
+            self.app._show_status(f"{t('common.error')}: {exc}", COLOR_BAD)
+
+    def _apply_saved_settings(self, language_code: str, language_changed: bool) -> None:
+        try:
             if language_changed:
-                i18n.set_language(code)
+                i18n.set_language(language_code)
                 self.app.rebuild_ui()
             else:
                 self.app.after_settings_changed()
@@ -824,6 +866,7 @@ class ImporterAppUI(MDApp):
     def rebuild_ui(self) -> None:
         """Ricostruisce l'interfaccia dopo un cambio di lingua."""
         try:
+            self.title = t("app.title")
             self._crop_value = self.crop_check.active
             self._move_value = self.move_check.active
             selected_edition = self._selected_edition()

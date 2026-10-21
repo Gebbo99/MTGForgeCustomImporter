@@ -135,6 +135,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.cache_dir": "Cache folder (LOCALAPPDATA)",
         "settings.hint": "If left empty, the path is detected automatically.",
         "settings.autodetect": "Auto-detect",
+        "settings.quick_paths": "Quick Forge paths",
+        "settings.quick_obb": "Use Android/obb/forge.app/forge",
+        "settings.quick_data": "Use Android/data/forge.app/files/forge",
         # --- nuova edizione ---
         "edition.title": "New edition",
         "edition.code": "Code (e.g. MHW)",
@@ -288,6 +291,9 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.cache_dir": "Cartella cache (LOCALAPPDATA)",
         "settings.hint": "Se lasciato vuoto, il percorso viene rilevato automaticamente.",
         "settings.autodetect": "Rileva automaticamente",
+        "settings.quick_paths": "Percorsi Forge rapidi",
+        "settings.quick_obb": "Usa Android/obb/forge.app/forge",
+        "settings.quick_data": "Usa Android/data/forge.app/files/forge",
         # --- nuova edizione ---
         "edition.title": "Nuova edizione",
         "edition.code": "Codice (es. MHW)",

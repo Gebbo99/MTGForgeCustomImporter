@@ -56,6 +56,11 @@ FORGE_BROWSE_BASES = (
     "/sdcard/forge",
 )
 
+FORGE_QUICK_CHOICES = (
+    ("settings.quick_obb", "/storage/emulated/0/Android/obb/forge.app/forge"),
+    ("settings.quick_data", "/storage/emulated/0/Android/data/forge.app/files/forge"),
+)
+
 _TREE_PICK_REQUEST = 7417
 _pending_tree_callback: Callable[[Path], None] | None = None
 
