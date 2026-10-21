@@ -26,11 +26,15 @@ SHARED_DIRS = (
 # Installazioni note dell'app Android di Forge (obb e data).
 FORGE_ROOT_CANDIDATES = (
     "/storage/emulated/0/Android/obb/forge.app/Forge",
+    "/storage/emulated/0/Android/obb/forge.app/forge",
     "/storage/emulated/0/Android/obb/forge.app",
     "/storage/emulated/0/Android/data/forge.app/files/Forge",
+    "/storage/emulated/0/Android/data/forge.app/files/forge",
     "/storage/emulated/0/Android/data/forge.app/files",
     "/storage/emulated/0/Forge",
+    "/storage/emulated/0/forge",
     "/sdcard/Forge",
+    "/sdcard/forge",
 )
 
 FORGE_SCAN_BASES = (
@@ -128,7 +132,9 @@ def _iter_forge_candidates() -> list[Path]:
                 if not package_dir.is_dir():
                     continue
                 add(package_dir / "Forge")
+                add(package_dir / "forge")
                 add(package_dir / "files" / "Forge")
+                add(package_dir / "files" / "forge")
                 add(package_dir / "files")
                 add(package_dir)
         except OSError:
@@ -145,6 +151,8 @@ def find_forge_root() -> Path | None:
         try:
             for child in root.iterdir():
                 if child.is_dir() and _looks_like_forge(child):
+                    return child
+                if child.is_dir() and child.name.lower() == "forge" and _looks_like_forge(child):
                     return child
         except OSError:
             continue

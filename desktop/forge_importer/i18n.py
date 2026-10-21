@@ -27,9 +27,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "common.none": "\u00abnone\u00bb",
         "common.cancel": "Cancel",
         "common.save": "Save",
-        "common.browse": "Browse",
+        "common.browse": "Browse...",
         "common.error": "Error",
         # --- finestra ---
+        "app.title": "Forge Card Importer",
         "app.language_label": "Language:",
         # --- toolbar ---
         "toolbar.add_folder": "Add folder...",
@@ -179,9 +180,10 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "common.none": "\u00abnessuna\u00bb",
         "common.cancel": "Annulla",
         "common.save": "Salva",
-        "common.browse": "Sfoglia",
+        "common.browse": "Sfoglia...",
         "common.error": "Errore",
         # --- finestra ---
+        "app.title": "Importatore Carte Forge",
         "app.language_label": "Lingua:",
         # --- toolbar ---
         "toolbar.add_folder": "Aggiungi cartella...",

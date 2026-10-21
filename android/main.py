@@ -412,11 +412,19 @@ class SettingsPopup(Popup):
 
         self.fields: dict[str, MDTextField] = {}
         for key in ("forge_root", "custom_dir", "cache_dir"):
+            row = BoxLayout(size_hint_y=None, height=dp(56), spacing=dp(8))
             field_ = MDTextField(
                 text=getattr(settings, key), hint_text=t(f"settings.{key}")
             )
+            row.add_widget(field_)
+            row.add_widget(
+                MDFlatButton(
+                    text=t("common.browse"),
+                    on_release=lambda _w, target=key: self._browse_field(target),
+                )
+            )
             self.fields[key] = field_
-            box.add_widget(field_)
+            box.add_widget(row)
 
         box.add_widget(
             MDLabel(
@@ -476,6 +484,19 @@ class SettingsPopup(Popup):
                 updated = True
         if not updated:
             self.app._show_status(t("status.forge_missing"), COLOR_WARN)
+
+    def _browse_field(self, key: str) -> None:
+        start_path = self.fields[key].text.strip()
+        FilePickerPopup(
+            self.app,
+            folder_mode=True,
+            on_folder=lambda path, target=key: self._set_field(target, path),
+            start_path=start_path,
+            title=t(f"settings.{key}"),
+        ).open()
+
+    def _set_field(self, key: str, path: Path) -> None:
+        self.fields[key].text = str(path)
 
     def _save(self) -> None:
         for key, field_ in self.fields.items():
@@ -575,15 +596,28 @@ class ReportPopup(Popup):
 class FilePickerPopup(Popup):
     """Selettore di immagini o cartelle dalla memoria del telefono."""
 
-    def __init__(self, app: "ImporterAppUI", folder_mode: bool, **kwargs) -> None:
-        title = t("dialog.folder_title") if folder_mode else t("dialog.files_title")
+    def __init__(
+        self,
+        app: "ImporterAppUI",
+        folder_mode: bool,
+        on_folder=None,
+        start_path: str = "",
+        **kwargs,
+    ) -> None:
+        title = kwargs.pop(
+            "title", t("dialog.folder_title") if folder_mode else t("dialog.files_title")
+        )
         super().__init__(title=title, size_hint=(0.98, 0.98), **kwargs)
         self.app = app
         self.folder_mode = folder_mode
+        self.on_folder = on_folder
 
         box = BoxLayout(orientation="vertical", spacing=dp(6), padding=dp(6))
+        initial_path = start_path.strip() or android_env.picker_start_dir()
+        if not Path(initial_path).is_dir():
+            initial_path = android_env.picker_start_dir()
         self.chooser = FileChooserListView(
-            path=android_env.picker_start_dir(),
+            path=initial_path,
             dirselect=folder_mode,
             multiselect=not folder_mode,
             filters=[] if folder_mode else IMAGE_FILTERS,
@@ -607,7 +641,10 @@ class FilePickerPopup(Popup):
         if self.folder_mode:
             target = current if not selection else Path(selection[0])
             if target.is_dir():
-                self.app.add_folder(target)
+                if self.on_folder is not None:
+                    self.on_folder(target)
+                else:
+                    self.app.add_folder(target)
             return
         files = [Path(item) for item in selection if Path(item).is_file()]
         if files:
@@ -661,7 +698,7 @@ class ImporterAppUI(MDApp):
             ocr.set_backend(mlkit_ocr.read_text)
             android_env.request_storage_access()
 
-        self.title = "Forge Card Importer"
+        self.title = t("app.title")
         self.theme_cls.theme_style = "Dark"
         self.theme_cls.primary_palette = "Blue"
         Window.clearcolor = (0.09, 0.09, 0.10, 1)
@@ -678,7 +715,7 @@ class ImporterAppUI(MDApp):
 
     def _build_ui(self, root: BoxLayout) -> None:
         self.toolbar = MDTopAppBar(
-            title="Forge Card Importer",
+            title=t("app.title"),
             elevation=2,
             right_action_items=[
                 ["cog", lambda _w: self.open_settings()],
