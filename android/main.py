@@ -20,7 +20,9 @@ import os
 import queue
 import sys
 import threading
+import traceback
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
@@ -99,6 +101,28 @@ COLOR_BOX = (0.16, 0.16, 0.18, 1)
 STATUS_COLORS = {"ok": COLOR_OK, "warn": COLOR_WARN, "bad": COLOR_BAD}
 
 IMAGE_FILTERS = ["*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.tif", "*.tiff"]
+
+
+def debug_log_path() -> Path:
+    return P.app_data_dir() / "android-debug.log"
+
+
+def log_debug(message: str) -> None:
+    try:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        debug_log_path().parent.mkdir(parents=True, exist_ok=True)
+        with debug_log_path().open("a", encoding="utf-8") as handle:
+            handle.write(f"[{stamp}] {message}\n")
+    except Exception:
+        pass
+
+
+def log_exception(context: str, exc: BaseException) -> None:
+    try:
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        log_debug(f"{context}: {tb}")
+    except Exception:
+        pass
 
 
 @dataclass
@@ -523,13 +547,16 @@ class SettingsPopup(Popup):
             self.app._show_status(t("status.forge_missing"), COLOR_WARN)
 
     def _browse_field(self, key: str) -> None:
+        log_debug(f"settings browse requested: {key}")
         if key == "forge_root" and android_env.IS_ANDROID:
             opened = android_env.pick_android_tree(
                 lambda path, target=key: self._set_field(target, path)
             )
             if opened:
+                log_debug("settings browse opened native tree picker")
                 return
         start_path = android_env.settings_start_dir(key, self.fields[key].text.strip())
+        log_debug(f"settings browse fallback picker: key={key}, start={start_path}")
         FilePickerPopup(
             self.app,
             folder_mode=True,
@@ -539,8 +566,10 @@ class SettingsPopup(Popup):
         ).open()
 
     def _set_field(self, key: str, path: Path) -> None:
+        log_debug(f"settings set field: {key} -> {path}")
         if key == "forge_root":
             root = android_env.resolve_forge_root(path) or path
+            log_debug(f"settings resolved forge root: {root}")
             self.fields[key].text = str(root)
             custom_dir = android_env._custom_dir(root)
             cache_dir = android_env._cache_dir(root)
@@ -556,14 +585,22 @@ class SettingsPopup(Popup):
 
     def _save(self) -> None:
         try:
+            log_debug("settings save pressed")
             for key, field_ in self.fields.items():
+                log_debug(f"settings save value: {key}={field_.text.strip()}")
                 setattr(self.app.settings, key, field_.text.strip())
             code = code_for_label(self.language_spinner.text)
+            log_debug(
+                f"settings save language: label={self.language_spinner.text}, code={code}"
+            )
             self.app.settings.language = code
             P.save_settings(self.app.settings)
+            log_debug(f"settings saved to {P.settings_file()}")
             self.save_status.text = t("settings.saved_restart")
             self.app._show_status(t("settings.saved_status"), COLOR_OK)
+            log_debug("settings save completed")
         except Exception as exc:  # pragma: no cover - dipende dall'ambiente
+            log_exception("settings save failed", exc)
             self.app._show_status(f"{t('common.error')}: {exc}", COLOR_BAD)
 
 
@@ -715,6 +752,34 @@ class ImporterAppUI(MDApp):
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
+        log_debug("app init start")
+        previous_excepthook = sys.excepthook
+
+        def _log_excepthook(exc_type, exc, tb) -> None:
+            try:
+                text = "".join(traceback.format_exception(exc_type, exc, tb))
+                log_debug(f"uncaught exception: {text}")
+            finally:
+                if previous_excepthook is not None:
+                    previous_excepthook(exc_type, exc, tb)
+
+        sys.excepthook = _log_excepthook
+        if hasattr(threading, "excepthook"):
+            previous_threading_hook = threading.excepthook
+
+            def _thread_hook(args) -> None:
+                try:
+                    text = "".join(
+                        traceback.format_exception(
+                            args.exc_type, args.exc_value, args.exc_traceback
+                        )
+                    )
+                    log_debug(f"uncaught thread exception: {text}")
+                finally:
+                    if previous_threading_hook is not None:
+                        previous_threading_hook(args)
+
+            threading.excepthook = _thread_hook
         self.settings = self._load_settings()
         i18n.set_language(self.settings.language)
         self.db: CardDB | None = None
@@ -748,6 +813,7 @@ class ImporterAppUI(MDApp):
     # ------------------------------------------------------------------ UI
 
     def build(self):
+        log_debug("app build start")
         if android_env.IS_ANDROID:
             ocr.set_backend(mlkit_ocr.read_text)
             android_env.request_storage_access()
@@ -765,6 +831,7 @@ class ImporterAppUI(MDApp):
         self.refresh_editions()
         self.show_paths()
         self.start_db_load()
+        log_debug("app build completed")
         return root
 
     def _build_ui(self, root: BoxLayout) -> None:
