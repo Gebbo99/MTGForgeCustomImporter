@@ -50,14 +50,37 @@ jobs:
       - name: Sincronizza il core condiviso da desktop/
         run: python tools/sync_core.py
 
+      - name: Prepara firma Android
+        shell: bash
+        run: |
+          if [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ] && [ -n "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" ] && [ -n "${{ secrets.ANDROID_KEY_ALIAS }}" ] && [ -n "${{ secrets.ANDROID_KEY_PASSWORD }}" ]; then
+            echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/android-release.keystore"
+            {
+              echo "ANDROID_BUILD_MODE=release"
+              echo "P4A_RELEASE_KEYSTORE=$RUNNER_TEMP/android-release.keystore"
+              echo "P4A_RELEASE_KEYSTORE_PASSWD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}"
+              echo "P4A_RELEASE_KEYALIAS=${{ secrets.ANDROID_KEY_ALIAS }}"
+              echo "P4A_RELEASE_KEYALIAS_PASSWD=${{ secrets.ANDROID_KEY_PASSWORD }}"
+            } >> "$GITHUB_ENV"
+          else
+            echo "ANDROID_BUILD_MODE=debug" >> "$GITHUB_ENV"
+            echo "::warning::Android signing secrets missing: APK will be debug-signed and may not update an existing installation."
+          fi
+
       - name: Compila l'APK
         working-directory: android
-        run: buildozer -v android debug
+        run: buildozer -v android "$ANDROID_BUILD_MODE"
+
+      - name: Prepara artefatto APK
+        shell: bash
+        run: |
+          mkdir -p dist/android
+          cp android/bin/*.apk dist/android/ForgeCustomImporter-android.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: forge-importer-android-apk
-          path: android/bin/*.apk
+          path: dist/android/ForgeCustomImporter-android.apk
           if-no-files-found: error
 
   desktop:
@@ -80,10 +103,16 @@ jobs:
         working-directory: desktop
         run: pyinstaller --noconfirm --clean ForgeCustomImporter.spec
 
+      - name: Prepara artefatto EXE
+        shell: bash
+        run: |
+          mkdir -p dist/windows
+          cp desktop/dist/ForgeCustomImporter.exe dist/windows/ForgeCustomImporter-windows.exe
+
       - uses: actions/upload-artifact@v4
         with:
           name: forge-importer-desktop-exe
-          path: desktop/dist/ForgeCustomImporter.exe
+          path: dist/windows/ForgeCustomImporter-windows.exe
           if-no-files-found: error
 
   release:
@@ -101,5 +130,5 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/forge-importer-android-apk/*.apk
-            dist/forge-importer-desktop-exe/*.exe
+            dist/forge-importer-android-apk/ForgeCustomImporter-android.apk
+            dist/forge-importer-desktop-exe/ForgeCustomImporter-windows.exe

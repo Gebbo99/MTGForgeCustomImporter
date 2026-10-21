@@ -55,5 +55,11 @@ android.permissions = READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, MANAGE_EXTE
 # ML Kit Text Recognition (modello latino incluso nell'APK, funziona offline).
 android.gradle_dependencies = com.google.android.gms:play-services-mlkit-text-recognition:19.0.0
 
+# Firma release: la CI usa una keystore stabile passata via environment
+# (`P4A_RELEASE_KEYSTORE`, `P4A_RELEASE_KEYSTORE_PASSWD`,
+# `P4A_RELEASE_KEYALIAS`, `P4A_RELEASE_KEYALIAS_PASSWD`). Con una firma sempre
+# uguale Android puo' installare le versioni nuove come aggiornamento, invece
+# di trattarle come un APK incompatibile con l'installazione esistente.
+
 # --- python-for-android ---
 p4a.branch = master
