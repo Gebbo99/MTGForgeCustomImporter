@@ -27,8 +27,9 @@ version = 1.0.0
 # su Android: l'OCR e' ML Kit (sotto), il fuzzy matching usa il fallback puro
 # Python in forge_importer/_fuzzshim.py.
 # Python viene fissato a 3.11 per evitare che python-for-android/Kivy usino
-# 3.14, che in CI rompe la compilazione delle estensioni C di Kivy.
-requirements = python3==3.11.9, kivy==2.3.0, kivymd==1.2.0, pyjnius, pillow, android
+# 3.14, che in CI rompe la compilazione delle estensioni C di Kivy. p4a
+# richiede che python3 e hostpython3 abbiano esattamente la stessa versione.
+requirements = python3==3.11.9, hostpython3==3.11.9, kivy==2.3.0, kivymd==1.2.0, pyjnius, pillow, android
 
 orientation = portrait
 fullscreen = 0
