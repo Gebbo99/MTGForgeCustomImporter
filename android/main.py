@@ -141,6 +141,38 @@ def log_exception(context: str, exc: BaseException) -> None:
         pass
 
 
+def _diagnose_paths() -> None:
+    """TEMPORANEO: verifica quali percorsi di Forge l'app riesce a leggere."""
+    probes = [
+        "/storage/emulated/0",
+        "/storage/emulated/0/Download",
+        "/storage/emulated/0/Android",
+        "/storage/emulated/0/Android/obb",
+        "/storage/emulated/0/Android/obb/forge.app",
+        "/storage/emulated/0/Android/obb/forge.app/Forge",
+        "/storage/emulated/0/Android/obb/forge.app/Forge/res/cardsfolder",
+        "/storage/emulated/0/Android/data",
+        "/storage/emulated/0/Android/data/forge.app/files",
+        "/sdcard/Android/obb/forge.app/Forge",
+        "/storage/emulated/0/Forge",
+    ]
+    try:
+        log_debug(f"diag all_files_access={android_env.has_all_files_access()}")
+    except Exception as exc:
+        log_debug(f"diag all_files_access errore: {exc}")
+    for probe in probes:
+        target = Path(probe)
+        try:
+            is_dir = str(target.is_dir())
+        except Exception as exc:
+            is_dir = f"errore {exc}"
+        try:
+            names = sorted(os.listdir(probe))[:6]
+            log_debug(f"diag {probe} isdir={is_dir} LIST={names}")
+        except Exception as exc:
+            log_debug(f"diag {probe} isdir={is_dir} LIST-ERR {type(exc).__name__}: {exc}")
+
+
 @dataclass
 class Row:
     """Una immagine con la sua proposta di importazione."""
@@ -834,6 +866,7 @@ class ImporterAppUI(MDApp):
 
     def build(self):
         log_debug("app build start")
+        _diagnose_paths()
         if android_env.IS_ANDROID:
             ocr.set_backend(mlkit_ocr.read_text)
             android_env.request_storage_access()
