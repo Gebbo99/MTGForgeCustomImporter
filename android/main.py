@@ -404,6 +404,7 @@ class SettingsPopup(Popup):
     def __init__(self, app: "ImporterAppUI", **kwargs) -> None:
         super().__init__(title=t("settings.title"), size_hint=(0.95, 0.9), **kwargs)
         self.app = app
+        self._pending_settings_apply: tuple[str, bool] | None = None
         settings = app.settings
 
         box = BoxLayout(orientation="vertical", spacing=dp(10), padding=dp(10))
@@ -553,15 +554,22 @@ class SettingsPopup(Popup):
             language_changed = code != i18n.get_language()
             self.app.settings.language = code
             P.save_settings(self.app.settings)
+            self._pending_settings_apply = (code, language_changed)
             self.dismiss()
-            Clock.schedule_once(
-                lambda _dt, lang=code, changed=language_changed: self._apply_saved_settings(
-                    lang, changed
-                ),
-                0,
-            )
         except Exception as exc:  # pragma: no cover - dipende dall'ambiente
             self.app._show_status(f"{t('common.error')}: {exc}", COLOR_BAD)
+
+    def on_dismiss(self) -> None:
+        pending = self._pending_settings_apply
+        self._pending_settings_apply = None
+        if pending is None:
+            return
+        Clock.schedule_once(
+            lambda _dt, lang=pending[0], changed=pending[1]: self._apply_saved_settings(
+                lang, changed
+            ),
+            0,
+        )
 
     def _apply_saved_settings(self, language_code: str, language_changed: bool) -> None:
         try:
