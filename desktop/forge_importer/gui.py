@@ -19,6 +19,7 @@ import os
 import queue
 import threading
 import tkinter as tk
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -85,6 +86,10 @@ class Row:
             return "state.copy_token", "ok"
         if self.base is None:
             return "state.choose_base", "bad"
+        # Token omonimi (stesso nome, stesso P/T, colori diversi): il
+        # punteggio alto non basta, la base va confermata a mano.
+        if self.reason == "reason.token_ambiguous":
+            return "state.check", "warn"
         if self.score >= 90:
             return "state.ready", "ok"
         return "state.check", "warn"
@@ -910,7 +915,7 @@ class CardEditor(ctk.CTkToplevel):
         sb = ttk.Scrollbar(list_frame, orient="vertical", command=self.results.yview)
         sb.grid(row=0, column=1, sticky="ns")
         self.results.configure(yscrollcommand=sb.set)
-        self._search_results: list[str] = []
+        self._search_results: list[CardInfo] = []
 
         self.base_label = ctk.CTkLabel(base_frame, text=self._base_text(), anchor="w")
         self.base_label.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 10))
@@ -928,10 +933,8 @@ class CardEditor(ctk.CTkToplevel):
         self.grab_set()
 
     def _populate_candidates(self) -> None:
-        names = []
         for cand in self.row.candidates:
-            names.append(cand.card.name)
-            if self.selected_base and cand.card.name == self.selected_base.name:
+            if self.selected_base and cand.card.entry == self.selected_base.entry:
                 self.base_label.configure(
                     text=t(
                         "editor.base_current_full",
@@ -940,10 +943,35 @@ class CardEditor(ctk.CTkToplevel):
                         reason=t(cand.reason),
                     )
                 )
-        self._search_results = names
+        self._show_cards([cand.card for cand in self.row.candidates])
+
+    def _show_cards(self, cards: list[CardInfo]) -> None:
+        """Riempe la lista dei candidati.
+
+        Se piu' carte hanno lo stesso nome l'etichetta porta anche P/T, tipo e
+        file: in Forge tre script si chiamano "Citizen Token" (2/2 e 1/1) e dal
+        solo nome non si capisce quale base si sta scegliendo.
+        """
+        self._search_results = list(cards)
+        duplicates = Counter(card.name for card in cards)
         self.results.delete(0, "end")
-        for name in names:
-            self.results.insert("end", name)
+        for card in cards:
+            label = (
+                self._card_label(card) if duplicates[card.name] > 1 else card.name
+            )
+            self.results.insert("end", label)
+
+    @staticmethod
+    def _card_label(card: CardInfo) -> str:
+        """Nome con i dettagli che distinguono le carte omonime."""
+        info = ", ".join(
+            part
+            for part in (card.pt.strip(), card.types.strip(), Path(card.entry).name)
+            if part
+        )
+        if not info:
+            return card.name
+        return t("editor.candidate_label", name=card.name, info=info)
 
     def _base_text(self) -> str:
         if self.selected_base is None:
@@ -954,25 +982,21 @@ class CardEditor(ctk.CTkToplevel):
         query = self.search_entry.get().strip()
         if not query:
             return
-        names = self.matcher.search_names(query, 30)
-        self._search_results = names
-        self.results.delete(0, "end")
-        for name in names:
-            self.results.insert("end", name)
+        self._show_cards(self.matcher.search_candidates(query, 30))
 
     def _on_pick(self, _event=None) -> None:
         selection = self.results.curselection()
         if not selection:
             return
-        name = self._search_results[selection[0]]
-        card = self.matcher.db.by_name(name)
-        if card is not None:
-            self.selected_base = card
-            self.base_label.configure(text=t("editor.base_current", name=card.name))
-            if self.rarity_menu is not None:
-                self.rarity_menu.set(self.master._deduced_rarity(card))
-            if self.same_name_var.get():
-                self._set_name(card.name)
+        card = self._search_results[selection[0]]
+        self.selected_base = card
+        duplicated = sum(1 for c in self._search_results if c.name == card.name) > 1
+        shown = self._card_label(card) if duplicated else card.name
+        self.base_label.configure(text=t("editor.base_current", name=shown))
+        if self.rarity_menu is not None:
+            self.rarity_menu.set(self.master._deduced_rarity(card))
+        if self.same_name_var.get():
+            self._set_name(card.name)
 
     def _apply_same_name(self) -> None:
         if self.same_name_var.get() and self.selected_base is not None:

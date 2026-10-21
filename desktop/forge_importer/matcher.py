@@ -45,17 +45,27 @@ class Matcher:
 
     def search_names(self, query: str, limit: int = 20) -> list[str]:
         """Ricerca per nome tollerante: "animar" trova "Animar, Soul of Elements"."""
+        return [card.name for card in self.search_candidates(query, limit)]
+
+    def search_candidates(self, query: str, limit: int = 20) -> list[CardInfo]:
+        """Come search_names, ma restituisce le carte invece dei soli nomi.
+
+        Il nome da solo non basta a scegliere la base: in Forge piu' script
+        possono chiamarsi allo stesso modo (tre "Citizen Token" con P/T e
+        colori diversi). La GUI ha bisogno dell'oggetto per mostrare tipo, P/T
+        e file, e per usare davvero la base scelta.
+        """
         query = query.strip()
         if not query:
-            return self._names[:limit]
+            return list(self.db.cards[:limit])
         exact = self.db.by_name(query)
         results = process.extract(
             normalize_plain(query), self._name_keys, scorer=fuzz.WRatio, limit=limit
         )
-        names = [self._names[index] for _, _, index in results]
-        if exact and exact.name not in names:
-            names.insert(0, exact.name)
-        return names
+        cards = [self.db.cards[index] for _, _, index in results]
+        if exact is not None and all(card.entry != exact.entry for card in cards):
+            cards.insert(0, exact)
+        return cards
 
     # ---------- riconoscimento ----------
 
@@ -171,55 +181,140 @@ class TokenMatcher:
 
     def search_names(self, query: str, limit: int = 20) -> list[str]:
         """Ricerca per nome tra i token (tollera il suffisso "Token")."""
+        return [card.name for card in self.search_candidates(query, limit)]
+
+    def search_candidates(self, query: str, limit: int = 20) -> list[CardInfo]:
+        """Vedi Matcher.search_candidates: la ricerca deve poter distinguere i
+        token omonimi (es. "Citizen Token" 2/2 e "Citizen Token" 1/1 G,W)."""
         query = query.strip()
-        names = self.db.names()
         if not query:
-            return names[:limit]
+            return list(self.db.cards[:limit])
         exact = self.db.by_name(query) or self.db.by_name(f"{query} Token")
         results = process.extract(
             normalize_plain(query), self._name_keys, scorer=fuzz.WRatio, limit=limit
         )
-        out = [names[index] for _, _, index in results]
-        if exact is not None and exact.name not in out:
-            out.insert(0, exact.name)
-        return out
+        cards = [self.db.cards[index] for _, _, index in results]
+        if exact is not None and all(card.entry != exact.entry for card in cards):
+            cards.insert(0, exact)
+        return cards
 
     def match(self, reading: CardReading, limit: int = 6) -> list[Candidate]:
         results: list[Candidate] = []
-        seen: set[str] = set()
+        by_key: dict[str, Candidate] = {}
 
         def add(card: CardInfo, score: float, reason: str) -> None:
-            key = normalize_plain(card.name)
-            if key in seen:
-                return
-            seen.add(key)
-            results.append(Candidate(card=card, score=score, reason=reason))
+            # Chiave sullo script, non sul nome: piu' token omonimi (es. tre
+            # "Citizen Token") devono comparire tutti tra i candidati, perche'
+            # solo P/T e tipo dicono quale usa la carta di partenza.
+            key = f"{card.source}|{card.entry}"
+            previous = by_key.get(key)
+            if previous is None:
+                candidate = Candidate(card=card, score=score, reason=reason)
+                by_key[key] = candidate
+                results.append(candidate)
+            elif score > previous.score:
+                # Lo stesso script puo' arrivare dal nome (ipotesi prudente) e
+                # poi dalla forma, che e' piu' affidabile: vale la prova piu'
+                # forte. Senza questo aggiornamento il token giusto resta
+                # congelato a un punteggio basso e un omonimo lo supera.
+                previous.score = score
+                previous.reason = reason
 
         for text in (reading.base_hint, reading.title):
             if not text:
                 continue
-            card, score = self._best_name(text)
-            if card is not None and score >= 86:
-                add(card, score, "reason.token_name")
+            candidate = self._best_name(text, reading)
+            if candidate is not None and candidate.score >= 86:
+                add(candidate.card, candidate.score, candidate.reason)
 
         for card, score in self._best_shape(reading, limit):
             add(card, score, "reason.type")
 
         results.sort(key=lambda item: -item.score)
+        self._flag_ambiguous(results, reading)
         return results[:limit]
 
-    def _best_name(self, text: str) -> tuple[CardInfo | None, float]:
+    def _flag_ambiguous(self, results: list[Candidate], reading: CardReading) -> None:
+        """Segnala i token che piu' script omonimi possono rappresentare.
+
+        I due "Citizen Token" 1/1 differiscono solo per i colori (bianco e
+        verde-bianco), che l'OCR non legge: la scelta non puo' essere
+        automatica, quindi la riga non deve risultare pronta. Il punteggio
+        resta quello della forma: abbassarlo farebbe scavalcare i candidati
+        ambigui da token che somigliano molto meno.
+        """
+        if not results:
+            return
+        key = normalize_plain(results[0].card.name)
+        variants = [
+            card
+            for card in self.db.cards
+            if normalize_plain(card.name) == key and self._shape_matches(card, reading)
+        ]
+        if len(variants) < 2:
+            return
+        for candidate in results:
+            if normalize_plain(candidate.card.name) == key:
+                candidate.reason = "reason.token_ambiguous"
+
+    def _best_name(self, text: str, reading: CardReading) -> Candidate | None:
+        """Candidato dedotto dal nome letto (senza il aiuto della forma)."""
         exact = self.db.by_name(text) or self.db.by_name(f"{text} Token")
         if exact is not None:
-            return exact, 100.0
+            return self._from_namesakes(exact, reading, 100.0)
         key = normalize_plain(text)
         if not key:
-            return None, 0.0
+            return None
         best = process.extractOne(key, self._name_keys, scorer=fuzz.WRatio)
         if best is None:
-            return None, 0.0
+            return None
         _, score, index = best
-        return self.db.cards[index], float(score)
+        return self._from_namesakes(self.db.cards[index], reading, float(score))
+
+    def _from_namesakes(
+        self, card: CardInfo, reading: CardReading, score: float
+    ) -> Candidate:
+        """Sceglie tra gli script che condividono lo stesso "Name:".
+
+        In Forge tre script si chiamano "Citizen Token" (2/2, 1/1 G,W e 1/1 W):
+        l'indice per nome restituisce sempre il primo, che spesso non e' il
+        token usato dalla carta importata. P/T e tipo letti dall'immagine
+        indicano quello giusto; se restano piu' candidati il punteggio viene
+        abbassato, cosi' la riga resta da controllare e si sceglie a mano.
+        Quando l'immagine non basta a distinguerli (i colori non si leggono)
+        vale l'ordine dei file, che non dipende dal filesystem e quindi non
+        cambia da una macchina all'altra.
+        """
+        key = normalize_plain(card.name)
+        same = sorted(
+            (c for c in self.db.cards if normalize_plain(c.name) == key),
+            key=lambda c: c.entry.lower(),
+        )
+        if len(same) < 2:
+            return Candidate(card=card, score=score, reason="reason.token_name")
+        matching = [c for c in same if self._shape_matches(c, reading)] or same
+        if len(matching) == 1:
+            return Candidate(card=matching[0], score=score, reason="reason.token_name")
+        return Candidate(
+            card=matching[0],
+            score=min(score, 88.0),
+            reason="reason.token_ambiguous",
+        )
+
+    @staticmethod
+    def _shape_matches(card: CardInfo, reading: CardReading) -> bool:
+        """Vero se P/T e tipi dello script concordano con quanto letto."""
+        query_pt = reading.pt.strip()
+        if query_pt and card.pt.strip() != query_pt:
+            return False
+        query_types = token_types(reading.type_line)
+        if query_types:
+            ratio = fuzz.token_sort_ratio(
+                query_types, normalize_for_compare(card.types)
+            )
+            if ratio < 80:
+                return False
+        return True
 
     def _best_shape(self, reading: CardReading, limit: int) -> list[tuple[CardInfo, float]]:
         query_types = token_types(reading.type_line)
@@ -237,7 +332,18 @@ class TokenMatcher:
                 pt_score = 100.0 if not card.pt.strip() else 0.0
             if query_rules:
                 oracle = self._oracles[index]
-                rules_score = fuzz.token_set_ratio(query_rules, oracle) if oracle else 0.0
+                # token_set_ratio da' 100 anche quando il token ha abilita' in
+                # piu' che l'immagine non mostra ("Flying" vale come "Flying,
+                # Vigilance"): la media con token_sort_ratio penalizza le
+                # parole mancanti, che sono proprio quelle che distinguono due
+                # token omonimi (Angelo vigilante e non).
+                if oracle:
+                    rules_score = (
+                        fuzz.token_set_ratio(query_rules, oracle)
+                        + fuzz.token_sort_ratio(query_rules, oracle)
+                    ) / 2
+                else:
+                    rules_score = 0.0
             else:
                 # nessun testo letto: meglio un token senza abilita' (vanilla)
                 rules_score = 100.0 if not self._oracles[index] else 45.0
@@ -246,5 +352,7 @@ class TokenMatcher:
             # il token sbagliato (meglio "base da scegliere" e intervento manuale).
             if score >= 80.0:
                 scored.append((card, score))
-        scored.sort(key=lambda item: -item[1])
+        # A parita' di punteggio decide il nome del file: la scelta non deve
+        # dipendere dall'ordine con cui il database elenca le carte.
+        scored.sort(key=lambda item: (-item[1], item[0].entry.lower()))
         return scored[:limit]

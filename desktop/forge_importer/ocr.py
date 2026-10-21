@@ -19,6 +19,12 @@ from .textutil import clean_title, normalize_ocr
 
 TITLE_BAND = 0.17
 FOOTER_BAND = 0.88
+# Il riquadro di forza/costituzione sta appena sotto la banda centrale: su un
+# token (488x680) il "1/1" cade a y 0.90, cioe' fuori banda. Va cercato solo
+# nella meta' destra e non nell'ultimissima riga, dove stanno numero di
+# collezione e artista.
+PT_BAND = 0.94
+PT_X_MIN = 0.5
 ROW_OVERLAP = 0.5
 TYPE_WORDS = (
     "creature", "instant", "sorcery", "enchantment", "artifact", "land",
@@ -160,9 +166,27 @@ def read_image(image_path: Path, max_width: int = 1600) -> CardReading:
 
     type_line, pt, rules = _split_middle(middle_lines)
     reading.type_line = type_line
-    reading.pt = pt
+    reading.pt = pt or _pt_below_footer(reading.lines)
     reading.rules_text = rules
     return reading
+
+
+def _pt_below_footer(lines: list[OcrLine]) -> str:
+    """Forza/costituzione stampata sotto la banda centrale.
+
+    Senza questo recupero il P/T resta vuoto su tutte le carte moderne e sui
+    token: il riconoscimento del token base finirebbe per basarsi sul solo
+    nome, che in Forge non distingue gli omonimi (tre "Citizen Token" con P/T
+    diverso).
+    """
+    for line in lines:
+        if (
+            FOOTER_BAND < line.y_top <= PT_BAND
+            and line.x_left >= PT_X_MIN
+            and _PT_RE.match(line.text)
+        ):
+            return line.text.strip()
+    return ""
 
 
 def _title_rows(lines: list[OcrLine]) -> list[str]:

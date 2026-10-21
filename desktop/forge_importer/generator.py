@@ -205,6 +205,13 @@ class Edition:
             line += f" @{artist}"
         self.token_lines.append(line)
 
+    def remove_tokens(self, filestem: str) -> None:
+        """Rimuove tutte le righe [tokens] che puntano a questo script."""
+        target = filestem.strip().lower()
+        self.token_lines = [
+            line for line in self.token_lines if _token_line_stem(line).lower() != target
+        ]
+
     # La sezione [other] registra le immagini che non sono ne' carte ne' token
     # con script: in pratica i token-copia creati da Eternalize ed Embalm, che
     # Forge richiama con la image key "eternalize_<nome>"/"embalm_<nome>".
@@ -312,6 +319,18 @@ def _token_line_stem(line: str) -> str:
     return match.group(2) if match else ""
 
 
+def _script_name(path: Path) -> str:
+    """Valore della riga "Name:" di uno script, oppure stringa vuota."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        if line.lower().startswith("name:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
 def _token_collector_of(edition: Edition, filestem: str) -> int:
     """Numero di collezione di un token gia' registrato nella sezione [tokens]."""
     target = filestem.strip().lower()
@@ -351,6 +370,27 @@ def script_name(text: str) -> str:
         if line.lower().startswith("name:"):
             return line.partition(":")[2].strip()
     return ""
+
+
+def _card_scripts(cards_dir: Path) -> dict[str, Path]:
+    """{nome carta (lower): percorso} dei card script custom del set."""
+    scripts: dict[str, Path] = {}
+    if not cards_dir.is_dir():
+        return scripts
+    for path in sorted(cards_dir.glob("**/*.txt")):
+        try:
+            name = script_name(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if name.strip():
+            scripts.setdefault(name.strip().lower(), path)
+    return scripts
+
+
+def _card_script_path(cards_dir: Path, card_name: str) -> Path:
+    """Script custom di una carta: <cards>/<iniziale>/<slug>.txt (come Forge)."""
+    slug = slugify(card_name)
+    return cards_dir / slug[:1] / f"{slug}.txt"
 
 
 def copy_mechanic(text: str) -> str:
@@ -708,7 +748,33 @@ class Importer:
             return mapping
         copy_mechanics = copy_mechanics or {}
         pics_target = self.token_pics_dir / code
-        for item in items:
+
+        # Stem effettivo di ogni token. Se l'edizione ha gia' un token con lo
+        # stesso nome si riusa il suo script, cosi' una nuova arte diventa una
+        # variante del token che le carte richiamano gia' anche quando la base
+        # riconosciuta per l'immagine e' diversa. Dentro lo stesso lotto i token
+        # omonimi condividono lo stem anche se le basi rilevate non coincidono.
+        stems: dict[int, str] = {}
+        by_name: dict[str, str] = {}
+        totals: dict[str, int] = {}
+        for index, item in enumerate(items):
+            name = item.new_name.strip()
+            if not name or item.is_copy or not item.base:
+                continue
+            if item.copy_prefix or name.lower() in copy_mechanics:
+                continue
+            key = name.lower()
+            filestem = by_name.get(key)
+            if filestem is None:
+                filestem = self._existing_token_stem(edition, name) or token_filestem(
+                    item.base.entry, name
+                )
+                by_name[key] = filestem
+            stems[index] = filestem
+            totals[filestem.lower()] = totals.get(filestem.lower(), 0) + 1
+        art_seen: dict[str, int] = {}
+
+        for index, item in enumerate(items):
             name = item.new_name.strip()
             if not name:
                 report.skipped += 1
@@ -728,7 +794,7 @@ class Importer:
                 continue
 
             base_stem = Path(item.base.entry).stem
-            filestem = token_filestem(item.base.entry, name)
+            filestem = stems.get(index) or token_filestem(item.base.entry, name)
             if base_stem.lower() in mapping:
                 report.log(
                     t("gen.token_multi", stem=base_stem, filestem=mapping[base_stem.lower()])
@@ -736,20 +802,56 @@ class Importer:
             else:
                 mapping[base_stem.lower()] = filestem
 
-            if edition.token_count(filestem):
+            key = filestem.lower()
+            art_total = totals.get(key, 1)
+            if art_total > 1:
+                # Piu' art dello stesso token: ognuna diventa una variante, con
+                # una riga e un collector propri, cosi' Forge ne mostra una a caso.
+                art_seen[key] = art_seen.get(key, 0) + 1
+                art_index = art_seen[key]
+                if art_index == 1:
+                    # Nuovo lotto di art per questo token: le righe e le immagini
+                    # di un import precedente vengono sostituite, altrimenti ad
+                    # ogni re-importazione se ne accumulerebbero di nuove.
+                    edition.remove_tokens(filestem)
+                    self._remove_token_variants(pics_target, filestem)
+                collector = edition.next_token_collector()
+                edition.add_token(filestem, collector, item.artist)
+                item.notes.append(
+                    t("gen.token_variant", base=item.base.name, index=art_index, total=art_total)
+                )
+            elif edition.token_count(filestem):
                 collector = _token_collector_of(edition, filestem)
             else:
                 collector = edition.next_token_collector()
                 edition.add_token(filestem, collector, item.artist)
+                item.notes.append(t("gen.token_created", base=item.base.name))
 
             item.image_dest = self._place_token_image(
                 item, pics_target, collector, filestem, options, report
             )
             item.script_dest = self._write_token_script(item, filestem, report)
-            item.notes.append(t("gen.token_created", base=item.base.name))
             report.tokens += 1
             report.log(t("gen.token_line", name=name, filestem=filestem, collector=collector))
         return mapping
+
+    def _existing_token_stem(self, edition: Edition, name: str) -> str | None:
+        """Stem di un token gia' nell'edizione il cui script si chiama `name`.
+
+        Il nome viene letto dagli script in custom/tokens, cosi' il token viene
+        ritrovato anche se la base riconosciuta per la nuova arte e' diversa:
+        senza questo controllo la stessa immagine reimportata finirebbe su uno
+        stem nuovo (token distinto) invece che fra le varianti di quello che le
+        carte del set gia' richiamano.
+        """
+        target = name.strip().lower()
+        if not target:
+            return None
+        for line in edition.token_lines:
+            stem = _token_line_stem(line)
+            if stem and _script_name(self.tokens_dir / f"{stem}.txt").strip().lower() == target:
+                return stem
+        return None
 
     def _copy_mechanics(self, edition: Edition, cards_dir: Path) -> dict[str, tuple[str, str]]:
         """{nome carta (lower): (prefisso, nome)} per i token-copia del set."""
@@ -812,6 +914,25 @@ class Importer:
         report.images_written += 1
         return destination
 
+    def _remove_token_variants(self, pics_target: Path, filestem: str) -> None:
+        """Elimina le immagini <collector>_<stem>.<ext> di un token.
+
+        Quando il token viene reimportato con un nuovo lotto di art le righe
+        [tokens] vengono riscritte con collector nuovi: senza questa pulizia le
+        immagini dei collector precedenti resterebbero orfane nella cache.
+        """
+        if not pics_target.is_dir():
+            return
+        pattern = re.compile(
+            r"^\d+_" + re.escape(filestem) + r"\.[a-z0-9]+$", re.IGNORECASE
+        )
+        for path in pics_target.iterdir():
+            if path.is_file() and pattern.match(path.name):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
     def _write_token_script(
         self, item: ImportItem, filestem: str, report: ImportReport
     ) -> Path | None:
@@ -835,31 +956,53 @@ class Importer:
         mapping: dict[str, str],
         report: ImportReport,
     ) -> None:
-        """Fa puntare le carte del set ai token appena importati.
+        """Fa puntare ai token importati le carte del set che li creano.
 
-        Nel testo delle regole una carta crea un token con
-        "DB$ Token | TokenScript$ <script>": le carte custom del set che
-        richiamano uno dei token base importati vengono riscritte per usare la
-        nuova stampa, cosi' il re-skin compare in partita.
+        Nel testo di una carta un token si crea con
+        "DB$ Token | TokenScript$ <script>": se lo script richiamato e' un token
+        base di cui e' stata importata una stampa custom, la carta deve puntare
+        alla nuova stampa, altrimenti in partita compare il token originale.
+        Si aggiornano gli script custom del set e, per le carte che ne sono
+        prive (re-skin come carte ufficiali ristampate con arte propria), se ne
+        crea uno copiando le regole della carta base. Uno script viene scritto
+        solo se la carta richiama davvero un token importato, cosi' le carte
+        senza token restano intatte.
         """
-        if not mapping or not cards_dir.is_dir():
+        if not mapping:
             return
-        names = edition.names()
-        for path in sorted(cards_dir.glob("**/*.txt")):
-            try:
-                text = path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+        existing = _card_scripts(cards_dir)
+        for entry in edition.entries:
+            base_name = entry.name.strip()
+            if not base_name:
                 continue
-            if script_name(text).strip().lower() not in names:
-                continue
+            path = existing.get(base_name.lower())
+            if path is not None:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+            else:
+                # La carta non ha uno script nel set: si prendono le regole
+                # della carta base, che richiamano ancora i token base.
+                base = self.db.by_name(base_name)
+                if base is None:
+                    continue
+                try:
+                    text = self.db.script_text(base)
+                except (KeyError, OSError) as exc:
+                    report.log(t("gen.warn_token_refs", file=base_name, error=exc))
+                    continue
+                path = _card_script_path(cards_dir, base_name)
             updated = _replace_token_refs(text, mapping)
             if updated == text:
                 continue
             try:
+                path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(updated, encoding="utf-8")
             except OSError as exc:
                 report.log(t("gen.warn_token_refs", file=path.name, error=exc))
                 continue
+            existing[base_name.lower()] = path
             report.log(t("gen.token_refs_updated", file=path.name))
 
 
