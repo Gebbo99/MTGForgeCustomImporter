@@ -39,7 +39,9 @@ android.api = 34
 android.minapi = 24
 android.ndk = 25b
 android.ndk_api = 24
-android.archs = arm64-v8a, armeabi-v7a
+# La build 32 bit (armeabi-v7a) fallisce nella toolchain Python su CI
+# mentre arm64-v8a e' la scelta piu' utile per i telefoni Android moderni.
+android.archs = arm64-v8a
 android.accept_sdk_license = True
 android.enable_androidx = True
 android.allow_backup = True
