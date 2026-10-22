@@ -26,6 +26,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 
+from . import adb
 from . import i18n
 from . import paths as P
 from .carddb import CardDB, CardInfo
@@ -103,8 +104,8 @@ class ForgeImporterApp(ctk.CTk):
         self.settings = P.load_settings()
         i18n.set_language(self.settings.language)
         self.title("Forge Custom Card Importer")
-        self.geometry("1180x720")
-        self.minsize(980, 600)
+        self.geometry("1280x760")
+        self.minsize(1040, 620)
 
         self.db: CardDB | None = None
         self.matcher: Matcher | None = None
@@ -127,6 +128,8 @@ class ForgeImporterApp(ctk.CTk):
         self._show_paths()
         self.after(80, self._poll_queue)
         self._start_db_load()
+        if self.settings.uses_phone():
+            self.after(200, self._check_phone)
 
     # ------------------------------------------------------------------ layout
 
@@ -261,15 +264,92 @@ class ForgeImporterApp(ctk.CTk):
             bar, text=t("bottom.move"), variable=self.move_var
         ).grid(row=0, column=3, padx=12, sticky="e")
 
+        dest_box = ctk.CTkFrame(bar, fg_color="transparent")
+        dest_box.grid(row=0, column=4, padx=(12, 0), sticky="e")
+        ctk.CTkLabel(dest_box, text=t("bottom.destination")).pack(side="left", padx=(0, 6))
+        self.target_menu = ctk.CTkSegmentedButton(
+            dest_box,
+            values=[t("target.pc"), t("target.phone")],
+            command=self._on_target_change,
+        )
+        self.target_menu.set(self._target_label())
+        self.target_menu.pack(side="left")
+
         self.import_button = ctk.CTkButton(
             bar,
             text=t("bottom.import"),
-            width=200,
+            width=170,
             height=36,
             font=ctk.CTkFont(size=14, weight="bold"),
             command=self.import_all,
         )
-        self.import_button.grid(row=0, column=4, padx=(6, 0))
+        self.import_button.grid(row=0, column=5, padx=(12, 0))
+
+        # Copia di un set gia' importato: utile per allineare il telefono senza
+        # ripetere OCR e riconoscimento. Attivo solo con destinazione Telefono.
+        self.send_button = ctk.CTkButton(
+            bar,
+            text=t("bottom.send_phone"),
+            width=165,
+            height=36,
+            command=self.send_to_phone,
+        )
+        self.send_button.grid(row=0, column=6, padx=(12, 0))
+        self._refresh_buttons()
+
+    # -------------------------------------------------------------- telefono
+
+    def _target_label(self) -> str:
+        return t("target.phone") if self.settings.uses_phone() else t("target.pc")
+
+    def _on_target_change(self, label: str) -> None:
+        """Cambia la destinazione dell'importazione (PC oppure telefono via adb)."""
+        self.settings.target = "phone" if label == t("target.phone") else "pc"
+        P.save_settings(self.settings)
+        self._refresh_buttons()
+        if self.settings.uses_phone():
+            self._check_phone()
+        else:
+            self._show_paths()
+
+    def _refresh_buttons(self) -> None:
+        """Abilita i pulsanti in base allo stato di lavoro e alla destinazione."""
+        self.import_button.configure(state="disabled" if self.busy else "normal")
+        can_send = self.settings.uses_phone() and not self.busy
+        self.send_button.configure(state="normal" if can_send else "disabled")
+
+    def _check_phone(self) -> None:
+        """Individua adb, il telefono e la cartella di Forge, senza bloccare la UI."""
+        settings = self.settings
+        if not settings.adb_path:
+            found = adb.find_adb()
+            if found:
+                settings.adb_path = found
+                P.save_settings(settings)
+        if not settings.adb_path:
+            self.status_label.configure(text=t("settings.adb_missing"), text_color=COLOR_WARN)
+            return
+        self.status_label.configure(text=t("status.starting"), text_color=COLOR_TEXT)
+        threading.Thread(
+            target=self._phone_probe_worker, args=(settings.adb_path,), daemon=True
+        ).start()
+
+    def _phone_probe_worker(self, executable: str) -> None:
+        try:
+            client = adb.Adb(executable, self.settings.adb_serial)
+            ready = [d for d in client.devices() if d.ready]
+            if not ready:
+                self.q.put(("phone_error", t("adb.no_device")))
+                return
+            device = ready[0]
+            client.serial = device.serial
+            root = self.settings.adb_forge_root or adb.detect_forge_root(client)
+            if not root:
+                self.q.put(("phone_error", t("adb.not_detected")))
+                return
+            self.q.put(("phone_ready", device, root))
+        except adb.AdbError as exc:
+            self.q.put(("phone_error", str(exc)))
 
     # ------------------------------------------------------------- impostazioni
 
@@ -310,17 +390,37 @@ class ForgeImporterApp(ctk.CTk):
             self._show_paths()
 
     def _show_ready(self) -> None:
-        self.status_label.configure(
-            text=t(
-                "status.db_ready",
-                cards=len(self.db.cards),
-                tokens=self._token_count,
-                root=self.settings.forge_root,
-            ),
-            text_color=COLOR_OK,
+        text = t(
+            "status.db_ready",
+            cards=len(self.db.cards),
+            tokens=self._token_count,
+            root=self.settings.forge_root,
         )
+        if self.settings.uses_phone():
+            text += "  |  " + t(
+                "settings.adb_ok",
+                device=self.settings.adb_serial,
+                root=self.settings.adb_forge_root,
+            )
+        self.status_label.configure(text=text, text_color=COLOR_OK)
 
     def _show_paths(self) -> None:
+        if self.settings.uses_phone():
+            problems = self.settings.phone_problems()
+            if problems:
+                self.status_label.configure(
+                    text="\u26a0 " + "  |  ".join(problems), text_color=COLOR_WARN
+                )
+            else:
+                self.status_label.configure(
+                    text=t(
+                        "settings.adb_ok",
+                        device=self.settings.adb_serial,
+                        root=self.settings.adb_forge_root,
+                    ),
+                    text_color=COLOR_OK,
+                )
+            return
         problems = self.settings.problems()
         if problems:
             self.status_label.configure(text="\u26a0 " + "  |  ".join(problems), text_color=COLOR_WARN)
@@ -340,6 +440,8 @@ class ForgeImporterApp(ctk.CTk):
         self.matcher = None
         self.token_matcher = None
         self._start_db_load()
+        if self.settings.uses_phone():
+            self._check_phone()
 
     def _refresh_editions(self) -> None:
         editions_dir = self.settings.editions_dir()
@@ -693,6 +795,21 @@ class ForgeImporterApp(ctk.CTk):
             return
         edition_path, code, name = target
 
+        phone = None
+        if self.settings.uses_phone():
+            problems = self.settings.phone_problems()
+            if problems:
+                messagebox.showwarning(
+                    t("msg.phone_title"),
+                    t("msg.phone_text") + "\n\n" + "\n".join(problems),
+                )
+                return
+            phone = adb.PhoneTarget(
+                self.settings.adb_path,
+                self.settings.adb_serial,
+                self.settings.adb_forge_root,
+            )
+
         options = ImportOptions(
             crop=self.crop_var.get(), move_within_pics=self.move_var.get()
         )
@@ -711,6 +828,8 @@ class ForgeImporterApp(ctk.CTk):
             for r in usable
         ]
 
+        custom_dir = self.settings.resolved_custom_dir()
+        cache_dir = self.settings.resolved_cache_dir()
         self._set_busy(True)
         self.progress.set(0)
         self.status_label.configure(
@@ -718,21 +837,91 @@ class ForgeImporterApp(ctk.CTk):
         )
         importer = Importer(
             self.db,
-            self.settings.resolved_custom_dir(),
+            custom_dir,
             self.settings.pics_dir(),
             self.settings.tokens_dir(),
             self.settings.token_pics_dir(),
         )
         threading.Thread(
             target=self._import_worker,
-            args=(importer, items, edition_path, code, name, options),
+            args=(
+                importer,
+                items,
+                edition_path,
+                code,
+                name,
+                options,
+                phone,
+                custom_dir,
+                cache_dir,
+            ),
             daemon=True,
         ).start()
 
-    def _import_worker(self, importer, items, edition_path, code, name, options) -> None:
+    def _import_worker(
+        self, importer, items, edition_path, code, name, options, phone, custom_dir, cache_dir
+    ) -> None:
         try:
             report = importer.run(items, edition_path, code, name, options)
+            # Destinazione telefono: dopo aver scritto in locale il set viene
+            # copiato nella cartella di Forge del telefono, che l'app Android
+            # non potrebbe raggiungere da sola.
+            if phone is not None:
+                self.q.put(("status_text", t("status.phone_pushing", code=code)))
+                for line in phone.push_set(code, custom_dir, cache_dir):
+                    report.log(line)
+                report.log(t("push.done", code=code))
             self.q.put(("import_done", report, code))
+        except Exception as exc:  # pragma: no cover - dipende dall'ambiente
+            self.q.put(("fatal", t("status.import_error", error=exc)))
+
+    def send_to_phone(self) -> None:
+        """Copia sul telefono un set gia' importato, senza rielaborarlo.
+
+        Usa la stessa copia idempotente dell'importazione (sovrascrive i file
+        con lo stesso nome e rimuove le varianti rimaste orfane): serve ad
+        allineare il telefono con i set importati in precedenza.
+        """
+        if self.busy or not self.settings.uses_phone():
+            return
+        edition = self._selected_edition()
+        if edition is None:
+            messagebox.showinfo(t("msg.no_edition_title"), t("msg.no_edition_text"))
+            return
+        problems = self.settings.phone_problems()
+        if problems:
+            messagebox.showwarning(
+                t("msg.phone_title"), t("msg.phone_text") + "\n\n" + "\n".join(problems)
+            )
+            return
+        if not messagebox.askyesno(
+            t("msg.send_title"), t("msg.send_text", code=edition.code)
+        ):
+            return
+
+        phone = adb.PhoneTarget(
+            self.settings.adb_path,
+            self.settings.adb_serial,
+            self.settings.adb_forge_root,
+        )
+        self._set_busy(True)
+        self.status_label.configure(
+            text=t("status.phone_pushing", code=edition.code), text_color=COLOR_TEXT
+        )
+        threading.Thread(
+            target=self._send_worker,
+            args=(
+                phone,
+                edition.code,
+                self.settings.resolved_custom_dir(),
+                self.settings.resolved_cache_dir(),
+            ),
+            daemon=True,
+        ).start()
+
+    def _send_worker(self, phone, code, custom_dir, cache_dir) -> None:
+        try:
+            self.q.put(("send_done", code, phone.push_set(code, custom_dir, cache_dir)))
         except Exception as exc:  # pragma: no cover - dipende dall'ambiente
             self.q.put(("fatal", t("status.import_error", error=exc)))
 
@@ -803,6 +992,30 @@ class ForgeImporterApp(ctk.CTk):
                 self.settings.pics_dir() / code,
                 self.settings.token_pics_dir() / code,
             )
+        elif kind == "status_text":
+            self.status_label.configure(text=message[1], text_color=COLOR_TEXT)
+        elif kind == "phone_ready":
+            _, device, root = message
+            self.settings.adb_serial = device.serial
+            self.settings.adb_forge_root = root
+            P.save_settings(self.settings)
+            if self.target_menu.get() != t("target.phone"):
+                self.target_menu.set(t("target.phone"))
+            self.status_label.configure(
+                text=t("settings.adb_ok", device=device.label, root=root),
+                text_color=COLOR_OK,
+            )
+        elif kind == "phone_error":
+            self.status_label.configure(text=message[1], text_color=COLOR_WARN)
+        elif kind == "send_done":
+            _, code, log = message
+            self._set_busy(False)
+            self.status_label.configure(
+                text=t("push.done", code=code), text_color=COLOR_OK
+            )
+            messagebox.showinfo(
+                t("msg.sent_title"), "\n".join(log) or t("push.done", code=code)
+            )
         elif kind == "fatal":
             self._set_busy(False)
             messagebox.showerror(t("common.error"), message[1])
@@ -810,8 +1023,7 @@ class ForgeImporterApp(ctk.CTk):
 
     def _set_busy(self, value: bool) -> None:
         self.busy = value
-        state = "disabled" if value else "normal"
-        self.import_button.configure(state=state)
+        self._refresh_buttons()
 
 
 # --------------------------------------------------------------------- dialoghi
@@ -1032,9 +1244,10 @@ class SettingsDialog(ctk.CTkToplevel):
     def __init__(self, master: ForgeImporterApp, settings: P.Settings, on_save) -> None:
         super().__init__(master)
         self.title(t("settings.title"))
-        self.geometry("760x400")
+        self.geometry("780x620")
         self.settings = settings
         self.on_save = on_save
+        self.devices: list[adb.Device] = []
 
         self.grid_columnconfigure(0, weight=1)
 
@@ -1065,6 +1278,8 @@ class SettingsDialog(ctk.CTkToplevel):
             text_color="#999999",
         ).grid(row=3, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 10))
 
+        self._build_phone_section(body, start_row=4)
+
         buttons = ctk.CTkFrame(self, fg_color="transparent")
         buttons.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 16))
         buttons.grid_columnconfigure(0, weight=1)
@@ -1078,6 +1293,141 @@ class SettingsDialog(ctk.CTkToplevel):
 
         self.transient(master)
         self.grab_set()
+
+    # ------------------------------------------------------------- telefono
+
+    def _build_phone_section(self, body: ctk.CTkFrame, start_row: int) -> None:
+        """Campi per raggiungere Forge sul telefono tramite adb."""
+        ctk.CTkLabel(
+            body,
+            text=t("settings.phone_section"),
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).grid(row=start_row, column=0, columnspan=3, sticky="w", padx=10, pady=(14, 4))
+
+        # adb.exe: se non e' indicato si prova a individuarlo da soli, cosi'
+        # l'utente non deve cercarlo a mano.
+        executable = self.settings.adb_path or (adb.find_adb() or "")
+        ctk.CTkLabel(body, text=t("settings.adb_path")).grid(
+            row=start_row + 1, column=0, sticky="w", padx=10, pady=10
+        )
+        self.entries["adb_path"] = ctk.CTkEntry(body)
+        self.entries["adb_path"].insert(0, executable)
+        self.entries["adb_path"].grid(
+            row=start_row + 1, column=1, sticky="ew", padx=(10, 6), pady=10
+        )
+        ctk.CTkButton(
+            body, text=t("common.browse"), width=80, command=self._browse_adb
+        ).grid(row=start_row + 1, column=2, padx=(0, 10), pady=10)
+
+        ctk.CTkLabel(body, text=t("settings.adb_device")).grid(
+            row=start_row + 2, column=0, sticky="w", padx=10, pady=10
+        )
+        initial = self.settings.adb_serial or t("settings.adb_none")
+        self.device_menu = ctk.CTkOptionMenu(body, values=[initial], width=320)
+        self.device_menu.set(initial)
+        self.device_menu.grid(row=start_row + 2, column=1, sticky="w", padx=(10, 6), pady=10)
+        ctk.CTkButton(
+            body, text=t("settings.adb_devices"), width=120, command=self._find_devices
+        ).grid(row=start_row + 2, column=2, padx=(0, 10), pady=10)
+
+        ctk.CTkLabel(body, text=t("settings.adb_forge_root")).grid(
+            row=start_row + 3, column=0, sticky="w", padx=10, pady=10
+        )
+        self.entries["adb_forge_root"] = ctk.CTkEntry(body)
+        self.entries["adb_forge_root"].insert(0, self.settings.adb_forge_root)
+        self.entries["adb_forge_root"].grid(
+            row=start_row + 3, column=1, sticky="ew", padx=(10, 6), pady=10
+        )
+        ctk.CTkButton(
+            body, text=t("settings.adb_detect"), width=80, command=self._detect_forge
+        ).grid(row=start_row + 3, column=2, padx=(0, 10), pady=10)
+
+        ctk.CTkLabel(
+            body, text=t("settings.adb_hint"), text_color="#999999", wraplength=680, justify="left"
+        ).grid(row=start_row + 4, column=0, columnspan=3, sticky="w", padx=10, pady=(0, 6))
+
+        self.adb_status = ctk.CTkLabel(body, text="", anchor="w", wraplength=680, justify="left")
+        self.adb_status.grid(row=start_row + 5, column=0, columnspan=3, sticky="ew", padx=10)
+
+    def _browse_adb(self) -> None:
+        path = filedialog.askopenfilename(
+            title=t("dialog.adb_title"),
+            filetypes=[(t("dialog.filter_exe"), "*.exe"), (t("dialog.filter_all"), "*.*")],
+        )
+        if path:
+            self.entries["adb_path"].delete(0, "end")
+            self.entries["adb_path"].insert(0, path)
+
+    def _find_devices(self) -> None:
+        """Elenca i telefoni collegati (in background: adb puo' essere lento)."""
+        executable = adb.find_adb(self.entries["adb_path"].get().strip())
+        if not executable:
+            self.adb_status.configure(text=t("settings.adb_missing"), text_color=COLOR_WARN)
+            return
+        self.entries["adb_path"].delete(0, "end")
+        self.entries["adb_path"].insert(0, executable)
+        self.adb_status.configure(text=t("status.starting"), text_color=COLOR_TEXT)
+        threading.Thread(
+            target=self._device_worker, args=(executable,), daemon=True
+        ).start()
+
+    def _device_worker(self, executable: str) -> None:
+        try:
+            devices = [d for d in adb.Adb(executable).devices() if d.ready]
+            error = ""
+        except adb.AdbError as exc:
+            devices, error = [], str(exc)
+        self.after(0, lambda: self._show_devices(devices, error))
+
+    def _show_devices(self, devices: list[adb.Device], error: str) -> None:
+        self.devices = devices
+        labels = [d.label for d in devices] or [t("settings.adb_none")]
+        self.device_menu.configure(values=labels)
+        self.device_menu.set(labels[0])
+        if error:
+            self.adb_status.configure(text=error, text_color=COLOR_WARN)
+        elif devices:
+            self.adb_status.configure(
+                text=t("adb.devices_found", count=len(devices)), text_color=COLOR_OK
+            )
+        else:
+            self.adb_status.configure(text=t("adb.no_devices"), text_color=COLOR_WARN)
+
+    def _detect_forge(self) -> None:
+        executable = self.entries["adb_path"].get().strip()
+        device = self._selected_device()
+        if not executable or device is None:
+            self.adb_status.configure(text=t("adb.no_device"), text_color=COLOR_WARN)
+            return
+        self.adb_status.configure(text=t("status.starting"), text_color=COLOR_TEXT)
+        threading.Thread(
+            target=self._forge_worker, args=(executable, device.serial), daemon=True
+        ).start()
+
+    def _forge_worker(self, executable: str, serial: str) -> None:
+        try:
+            root = adb.detect_forge_root(adb.Adb(executable, serial))
+            error = ""
+        except adb.AdbError as exc:
+            root, error = None, str(exc)
+        self.after(0, lambda: self._show_forge(root, error))
+
+    def _show_forge(self, root: str | None, error: str) -> None:
+        if root:
+            self.entries["adb_forge_root"].delete(0, "end")
+            self.entries["adb_forge_root"].insert(0, root)
+            self.adb_status.configure(text=t("adb.detected", root=root), text_color=COLOR_OK)
+        else:
+            self.adb_status.configure(
+                text=error or t("adb.not_detected"), text_color=COLOR_WARN
+            )
+
+    def _selected_device(self) -> adb.Device | None:
+        label = self.device_menu.get()
+        for device in self.devices:
+            if device.label == label:
+                return device
+        return None
 
     def _browse(self, key: str) -> None:
         folder = filedialog.askdirectory(title=t("dialog.pick_folder"))
@@ -1100,6 +1450,9 @@ class SettingsDialog(ctk.CTkToplevel):
     def _save(self) -> None:
         for key, entry in self.entries.items():
             setattr(self.settings, key, entry.get().strip())
+        device = self._selected_device()
+        if device is not None:
+            self.settings.adb_serial = device.serial
         self.on_save()
         self.destroy()
 

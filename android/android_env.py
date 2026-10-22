@@ -24,13 +24,13 @@ SHARED_DIRS = (
     "/storage/emulated/0",
 )
 
-# Installazioni note dell'app Android di Forge (obb e data).
+# Installazioni note dell'app Android di Forge (obb e data). Il percorso reale
+# del pacchetto forge.app e' ".../obb/forge.app/Forge": la cartella "Forge" ha
+# la maiuscola e il filesystem di Android distingue maiuscole e minuscole.
 FORGE_ROOT_CANDIDATES = (
     "/storage/emulated/0/Android/obb/forge.app/Forge",
-    "/storage/emulated/0/Android/obb/forge.app/forge",
     "/storage/emulated/0/Android/obb/forge.app",
     "/storage/emulated/0/Android/data/forge.app/files/Forge",
-    "/storage/emulated/0/Android/data/forge.app/files/forge",
     "/storage/emulated/0/Android/data/forge.app/files",
     "/storage/emulated/0/Forge",
     "/storage/emulated/0/forge",
@@ -57,8 +57,8 @@ FORGE_BROWSE_BASES = (
 )
 
 FORGE_QUICK_CHOICES = (
-    ("settings.quick_obb", "/storage/emulated/0/Android/obb/forge.app/forge"),
-    ("settings.quick_data", "/storage/emulated/0/Android/data/forge.app/files/forge"),
+    ("settings.quick_obb", "/storage/emulated/0/Android/obb/forge.app/Forge"),
+    ("settings.quick_data", "/storage/emulated/0/Android/data/forge.app/files/Forge"),
 )
 
 _TREE_PICK_REQUEST = 7417

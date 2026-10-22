@@ -5,7 +5,9 @@ Il core (OCR, riconoscimento, scrittura dei file di Forge) vive in
 una copia in `android/forge_importer`, che non e' versionata: viene ricreata da
 questo script (e dal workflow GitHub Actions) prima della build.
 
-Va copiato tutto tranne `gui.py`, che usa Tkinter e non esiste su Android.
+Vanno copiati solo i moduli realmente multipiattaforma: `gui.py` (usa Tkinter,
+che su Android non esiste) e `adb.py` (ponte verso adb pilotato dal PC) restano
+esclusivi del desktop.
 
 Uso, dalla radice del repo:
 
@@ -22,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "desktop" / "forge_importer"
 TARGET = ROOT / "android" / "forge_importer"
 
-# Moduli condivisi (tutto il pacchetto tranne la GUI desktop).
+# Moduli condivisi: esclude gui.py e adb.py, che sono solo per il desktop.
 MODULES = (
     "__init__.py",
     "_fuzzshim.py",

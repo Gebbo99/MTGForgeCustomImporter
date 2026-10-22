@@ -154,6 +154,26 @@ class Settings:
     custom_dir: str = ""
     cache_dir: str = ""
     language: str = DEFAULT_LANGUAGE
+    # Destinazione dell'importazione: "pc" (solo questo computer) o "phone"
+    # (si scrive qui e poi si copia il set sul telefono via adb).
+    target: str = "pc"
+    adb_path: str = ""
+    adb_serial: str = ""
+    adb_forge_root: str = ""
+
+    def uses_phone(self) -> bool:
+        return self.target == "phone"
+
+    def phone_problems(self) -> list[str]:
+        """Perche' la destinazione telefono non e' utilizzabile (vuoto = ok)."""
+        issues: list[str] = []
+        if not self.adb_path:
+            issues.append(t("settings.adb_missing"))
+        if not self.adb_serial:
+            issues.append(t("adb.no_devices"))
+        if not self.adb_forge_root:
+            issues.append(t("adb.not_detected"))
+        return issues
 
     def resolved_forge_root(self) -> Path:
         return Path(self.forge_root) if self.forge_root else Path("")
@@ -231,6 +251,10 @@ def load_settings() -> Settings:
                 custom_dir=data.get("custom_dir", ""),
                 cache_dir=data.get("cache_dir", ""),
                 language=data.get("language", DEFAULT_LANGUAGE) or DEFAULT_LANGUAGE,
+                target=data.get("target", "pc") or "pc",
+                adb_path=data.get("adb_path", ""),
+                adb_serial=data.get("adb_serial", ""),
+                adb_forge_root=data.get("adb_forge_root", ""),
             )
         except (json.JSONDecodeError, OSError):
             settings = Settings()
