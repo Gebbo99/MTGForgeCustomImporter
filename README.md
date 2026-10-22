@@ -12,6 +12,10 @@ The repo ships two distinct apps built from the same core:
 | **Desktop** | [`desktop/`](desktop/) | `ForgeCustomImporter.exe` | Windows |
 | **Android** | [`android/`](android/) | `forgecustomimporter-*-debug.apk` | Android 7+ (phone) |
 
+The Windows app can also **deploy a set to the phone over USB** with `adb`,
+without using the Android app at all: see
+[Deploying a set to the phone (adb)](#deploying-a-set-to-the-phone-adb).
+
 ---
 
 ## Download
@@ -56,11 +60,48 @@ locations (`Android/obb/forge.app/Forge`, `Android/data/forge.app/files/Forge`,
 
 ---
 
+## Deploying a set to the phone (adb)
+
+Android blocks ordinary apps from writing inside `Android/obb/forge.app`, so the
+Android app cannot import there on its own. The **desktop** app can: it does all
+the work locally and then uses **adb** to copy the finished set into Forge's
+folders on the phone. adb is only the courier — OCR, matching and file
+generation all happen on the PC.
+
+Setup (once):
+
+1. Install **Android Platform Tools** (Google) and connect the phone by USB. The
+   app finds `adb` automatically in the usual locations, or you can pick
+   `adb.exe` by hand.
+2. On the phone enable **Developer options → USB debugging** and accept the
+   authorization prompt that shows up.
+3. In the app open **Settings → Phone (adb)**: press *Find phones*, choose the
+   device, then *Detect* the Forge folder (usually
+   `/storage/emulated/0/Android/obb/forge.app/Forge`).
+4. Set **Destination: Phone** in the bottom bar.
+
+From there you have two ways to copy a set:
+
+- **Import all into Forge** — with destination *Phone*, importing writes the set
+  locally *and* copies it to the phone in the same run;
+- **Send set to phone** — copies a set you **already imported** earlier, without
+  running OCR or importing it again: pick it in the **Edition** box and press
+  the button.
+
+Both paths are idempotent: files with the same name are overwritten and stale
+variants of the same art are removed, so repeating them never duplicates
+anything. The phone only has to be connected (with USB debugging on) while the
+copy is running.
+
+---
+
 ## Repository layout
 
 ```
 desktop/                  Windows app (CustomTkinter + PyInstaller)
     forge_importer/       shared core: OCR, matching, Forge file writing
+        gui.py            desktop UI (not shared)
+        adb.py            USB deployment to the phone (not shared)
     ForgeCustomImporter.spec
 android/                  Android app (Kivy + KivyMD, built with Buildozer)
     main.py               UI and app flow
@@ -74,7 +115,8 @@ tools/sync_core.py        copies the shared core into android/ before a build
 The core (`carddb`, `matcher`, `generator`, `textutil`, `rarity`, ...) is shared
 by both apps and lives in `desktop/forge_importer`, which is the single source
 of truth. The Android app works on a copy that `tools/sync_core.py` regenerates
-right before the build, so the two versions can never drift apart.
+right before the build, so the two versions can never drift apart. `gui.py` and
+`adb.py` are desktop-only and are never copied to the Android app.
 
 The differences between the two versions are only the UI toolkit and the OCR
 engine: the desktop uses RapidOCR (onnxruntime) and Tkinter, Android uses ML Kit
