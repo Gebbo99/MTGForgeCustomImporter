@@ -10,15 +10,6 @@ build/
 dist/
 *.spec.bak
 
-# --- Build output (android / Buildozer) ---
-android/.buildozer/
-android/bin/
-android/build/
-android_build/
-
-# --- Core condiviso: copia generata da tools/sync_core.py ---
-android/forge_importer/
-
 # --- Artefatti locali ---
 *.log
 check.log

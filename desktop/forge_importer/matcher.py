@@ -10,13 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-try:  # rapidfuzz e' una estensione C: su Android non e' compilabile.
-    from rapidfuzz import fuzz, process
-except ImportError:  # pragma: no cover - dipende dall'ambiente
-    from . import _fuzzshim as _fallback
-
-    fuzz = _fallback.fuzz
-    process = _fallback.process
+from rapidfuzz import fuzz, process
 
 from .carddb import CardDB, CardInfo
 from .ocr import TYPE_WORDS, CardReading

@@ -864,8 +864,7 @@ class ForgeImporterApp(ctk.CTk):
         try:
             report = importer.run(items, edition_path, code, name, options)
             # Destinazione telefono: dopo aver scritto in locale il set viene
-            # copiato nella cartella di Forge del telefono, che l'app Android
-            # non potrebbe raggiungere da sola.
+            # copiato nella cartella di Forge del telefono via adb.
             if phone is not None:
                 self.q.put(("status_text", t("status.phone_pushing", code=code)))
                 for line in phone.push_set(code, custom_dir, cache_dir):

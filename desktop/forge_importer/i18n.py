@@ -30,7 +30,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "common.browse": "Browse...",
         "common.error": "Error",
         # --- finestra ---
-        "app.title": "Forge Card Importer",
         "app.language_label": "Language:",
         # --- toolbar ---
         "toolbar.add_folder": "Add folder...",
@@ -43,7 +42,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "status.forge_path": "Forge: {root}",
         "status.loading_db": "Loading Forge card archive...",
         "status.forge_missing": "Forge installation not found: open Settings and pick the folder.",
-        "status.storage_access_needed": "Grant full file access in Android settings, then tap Auto-detect again.",
         "status.db_missing": "Card archive not found in res\\cardsfolder.",
         "status.db_ready": "Ready. {cards} cards and {tokens} tokens indexed | Forge: {root}",
         "status.analyzing": "Analyzing {count} images...",
@@ -149,11 +147,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.cache_dir": "Cache folder (LOCALAPPDATA)",
         "settings.hint": "If left empty, the path is detected automatically.",
         "settings.autodetect": "Auto-detect",
-        "settings.quick_paths": "Quick Forge paths",
-        "settings.quick_obb": "Use Android/obb/forge.app/Forge",
-        "settings.quick_data": "Use Android/data/forge.app/files/Forge",
-        "settings.saved_restart": "Settings saved. Close and reopen the app to apply language and paths safely.",
-        "settings.saved_status": "Settings saved.",
         # --- telefono (adb) ---
         "settings.phone_section": "Phone (adb)",
         "settings.adb_path": "adb executable",
@@ -231,7 +224,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "common.browse": "Sfoglia...",
         "common.error": "Errore",
         # --- finestra ---
-        "app.title": "Importatore Carte Forge",
         "app.language_label": "Lingua:",
         # --- toolbar ---
         "toolbar.add_folder": "Aggiungi cartella...",
@@ -244,7 +236,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "status.forge_path": "Forge: {root}",
         "status.loading_db": "Caricamento archivio carte di Forge...",
         "status.forge_missing": "Installazione di Forge non trovata: apri Impostazioni e indica la cartella.",
-        "status.storage_access_needed": "Concedi l'accesso completo ai file nelle impostazioni Android, poi premi di nuovo Rileva automaticamente.",
         "status.db_missing": "Archivio carte non trovato in res\\cardsfolder.",
         "status.db_ready": "Pronto. {cards} carte e {tokens} token indicizzati | Forge: {root}",
         "status.analyzing": "Analisi di {count} immagini...",
@@ -350,11 +341,6 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
         "settings.cache_dir": "Cartella cache (LOCALAPPDATA)",
         "settings.hint": "Se lasciato vuoto, il percorso viene rilevato automaticamente.",
         "settings.autodetect": "Rileva automaticamente",
-        "settings.quick_paths": "Percorsi Forge rapidi",
-        "settings.quick_obb": "Usa Android/obb/forge.app/Forge",
-        "settings.quick_data": "Usa Android/data/forge.app/files/Forge",
-        "settings.saved_restart": "Impostazioni salvate. Chiudi e riapri l'app per applicare in sicurezza lingua e percorsi.",
-        "settings.saved_status": "Impostazioni salvate.",
         # --- telefono (adb) ---
         "settings.phone_section": "Telefono (adb)",
         "settings.adb_path": "Eseguibile adb",

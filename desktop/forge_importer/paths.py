@@ -34,14 +34,9 @@ DEFAULT_CACHE_DIR = FORGE_LOCAL_DIR / "Cache"
 
 
 def app_data_dir() -> Path:
-    """Cartella di lavoro del tool (cache indice, impostazioni).
-
-    Su Android non esiste %LOCALAPPDATA%: l'app imposta FORGE_IMPORTER_DATA
-    sulla propria cartella privata prima di importare questo modulo.
-    """
+    """Cartella di lavoro del tool (cache indice, impostazioni)."""
     root = (
-        os.environ.get("FORGE_IMPORTER_DATA")
-        or os.environ.get("LOCALAPPDATA")
+        os.environ.get("LOCALAPPDATA")
         or str(Path.home() / "AppData" / "Local")
     )
     d = Path(root) / APP_DIR_NAME

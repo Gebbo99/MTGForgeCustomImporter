@@ -1,8 +1,7 @@
-"""Regole di denominazione delle carte, condivise da tutte le interfacce.
+"""Regole di denominazione delle carte, indipendenti dall'interfaccia grafica.
 
-Qui vivono le poche regole che non dipendono dall'interfaccia grafica (desktop
-o Android): come ricavare il nome dal file, come riconoscere una terra base e
-come scrivere il nome di un token.
+Qui vivono le poche regole che non dipendono dalla GUI: come ricavare il nome
+dal file, come riconoscere una terra base e come scrivere il nome di un token.
 """
 
 from __future__ import annotations

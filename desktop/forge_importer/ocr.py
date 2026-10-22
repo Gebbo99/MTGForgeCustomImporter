@@ -35,7 +35,6 @@ TYPE_WORDS = (
 _PT_RE = re.compile(r"^\s*\d{1,2}\s*/\s*\d{1,2}\s*$")
 
 _ocr_engine = None
-_backend = None
 
 
 class OcrUnavailable(RuntimeError):
@@ -54,25 +53,6 @@ def engine():
             ) from exc
         _ocr_engine = RapidOCR()
     return _ocr_engine
-
-
-def set_backend(backend) -> None:
-    """Registra un motore OCR alternativo.
-
-    `backend` e' un callable che accetta il percorso di una immagine e
-    restituisce una lista di `(box, testo, score)`, dove `box` sono i quattro
-    vertici in pixel: lo stesso formato prodotto da RapidOCR. Serve su Android,
-    dove al posto di onnxruntime si usa l'OCR on-device di ML Kit.
-    """
-    global _backend
-    _backend = backend
-
-
-def run_engine(image_file: str):
-    """Esegue il motore OCR attivo (backend registrato o RapidOCR)."""
-    if _backend is not None:
-        return _backend(image_file)
-    return engine()(image_file)
 
 
 @dataclass
@@ -127,7 +107,7 @@ def read_image(image_path: Path, max_width: int = 1600) -> CardReading:
     with tempfile.TemporaryDirectory() as tmp:
         work_file = Path(tmp) / "card.png"
         image.save(work_file)
-        result = run_engine(str(work_file))
+        result = engine()(str(work_file))
 
     boxes = result[0] if isinstance(result, tuple) else result
     width, height = image.size
