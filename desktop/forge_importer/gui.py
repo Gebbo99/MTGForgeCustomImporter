@@ -32,9 +32,12 @@ from . import paths as P
 from .carddb import CardDB, CardInfo
 from .cards import (
     DEFAULT_RARITY,
+    custom_name_from_filename,
     detect_basic_land,
     is_basic_land,
     name_from_filename,
+    real_name_from_filename,
+    same_name_ignoring_spaces,
     token_name,
 )
 from .generator import (
@@ -45,6 +48,8 @@ from .generator import (
     Importer,
     copy_mechanic,
     copy_mechanics_in,
+    emblem_base_name,
+    emblem_hint,
     scan_images,
 )
 from .i18n import code_for_label, label_for_code, language_labels, t
@@ -78,11 +83,14 @@ class Row:
     is_copy: bool = False
     copy_card: str = ""
     copy_prefix: str = ""
+    is_emblem: bool = False
 
     def status(self) -> tuple[str, str]:
         """(chiave di traduzione dello stato, tag colore) per evidenziare le anomalie."""
         if self.reading is None:
             return "state.read_error", "bad"
+        if self.is_emblem:
+            return "state.emblem", "ok" if self.base else "bad"
         if self.is_copy:
             return "state.copy_token", "ok"
         if self.base is None:
@@ -659,6 +667,24 @@ class ForgeImporterApp(ctk.CTk):
             base, title, score, reason = self._resolve_basic_land(
                 base, title, path.stem, score, reason
             )
+            # Il nome fra parentesi nel file e' scritto dall'utente ed e' uguale
+            # per tutte le arti della stessa carta: se il titolo letto dall'OCR
+            # coincide a meno di spazi lo si riporta a quella grafia, altrimenti
+            # un refuso su una sola immagine spezzerebbe il gruppo di arti.
+            custom = custom_name_from_filename(path)
+            if custom and same_name_ignoring_spaces(title, custom):
+                title = custom
+        emblem = not token and emblem_hint(title, path.stem) and (base is None or score < 80)
+        if emblem:
+            title, base, score, reason = self._resolve_emblem(title, path.stem, base, score, reason)
+        if base is None and not token and self.db is not None:
+            # Il retro di una carta multi-faccia puo' arrivare senza testo
+            # delle regole: se il nome reale nel file e' la faccia di una carta
+            # nota la base si ricava da li', cosi' le due immagini vengono
+            # abbinate in fase di scrittura.
+            lookup = self.db.by_face(real_name_from_filename(path))
+            if lookup is not None:
+                base, score, reason = lookup[0], 100.0, "reason.face_match"
         row = Row(
             iid=iid,
             image_path=path,
@@ -670,6 +696,7 @@ class ForgeImporterApp(ctk.CTk):
             new_name=title,
             rarity=self._deduced_rarity(base),
             is_token=token,
+            is_emblem=emblem,
         )
         self.rows[iid] = row
         self.tree.insert("", "end", iid=iid, values=self._values(row), tags=(row.status()[1],))
@@ -694,6 +721,24 @@ class ForgeImporterApp(ctk.CTk):
         if card is None:
             return base, title, score, reason
         return card, land, 100.0, "reason.basic_land"
+
+    def _resolve_emblem(
+        self, title: str, stem: str, base: CardInfo | None, score: float, reason: str
+    ) -> tuple[str, CardInfo | None, float, str]:
+        """Aggancia un emblema al Planeswalker a cui appartiene.
+
+        Il file o il titolo letto portano il nome dell'emblema ("Emblem —
+        Chandra, Torch of Defiance"), mentre la chiave immagine si ricava dal
+        nome ufficiale della carta base: si cerca quindi il Planeswalker con il
+        nome ripulito dal prefisso, cosi' l'utente lo trova gia' selezionato.
+        """
+        hint = emblem_base_name(title) or emblem_base_name(stem)
+        if not hint:
+            return title, base, score, reason
+        card, hint_score = self.matcher.match_name(hint) if self.matcher else (None, 0.0)
+        if card is None or hint_score < 80:
+            return hint, base, score, reason
+        return hint, card, hint_score, "reason.emblem"
 
     def _deduced_rarity(self, base: CardInfo | None) -> str:
         """Rarita' della carta base dedotta dalle edizioni ufficiali di Forge."""
@@ -724,7 +769,7 @@ class ForgeImporterApp(ctk.CTk):
             f"{row.score:.0f}" if row.base else "\u2014",
             self._reason_text(row),
             row.new_name,
-            "\u2014" if row.is_token else row.rarity,
+            "\u2014" if (row.is_token or row.is_emblem) else row.rarity,
             t(status_key),
         )
 
@@ -774,7 +819,7 @@ class ForgeImporterApp(ctk.CTk):
         usable = [
             r for r in rows if r.new_name.strip() and (r.base is not None or r.is_copy)
         ]
-        missing = [r for r in rows if r.base is None and not r.is_copy]
+        missing = [r for r in rows if r.base is None and not r.is_copy and not r.is_emblem]
         if missing:
             names = "\n".join(f"  - {r.image_path.name}" for r in missing[:12])
             more = (
@@ -824,6 +869,7 @@ class ForgeImporterApp(ctk.CTk):
                 is_copy=r.is_copy,
                 copy_prefix=r.copy_prefix,
                 copy_card=r.copy_card,
+                is_emblem=r.is_emblem,
             )
             for r in usable
         ]
@@ -973,15 +1019,22 @@ class ForgeImporterApp(ctk.CTk):
         elif kind == "import_done":
             _, report, code = message
             self._set_busy(False)
-            self.status_label.configure(
-                text=t(
+            if report.emblems:
+                status = t(
+                    "status.import_done_emblems",
+                    imported=report.imported,
+                    tokens=report.tokens,
+                    emblems=report.emblems,
+                    code=code,
+                )
+            else:
+                status = t(
                     "status.import_done",
                     imported=report.imported,
                     tokens=report.tokens,
                     code=code,
-                ),
-                text_color=COLOR_OK,
-            )
+                )
+            self.status_label.configure(text=status, text_color=COLOR_OK)
             self._refresh_editions()
             self.clear_rows()
             ReportDialog(
@@ -1080,7 +1133,7 @@ class CardEditor(ctk.CTkToplevel):
         self.artist_entry.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=6)
 
         self.same_name_var = tk.BooleanVar(value=False)
-        if not row.is_token:
+        if not row.is_token and not row.is_emblem:
             ctk.CTkCheckBox(
                 form,
                 text=t("editor.same_name"),
@@ -1088,20 +1141,24 @@ class CardEditor(ctk.CTkToplevel):
                 command=self._apply_same_name,
             ).grid(row=3, column=1, sticky="w", padx=(10, 0), pady=6)
 
+        self.emblem_var = tk.BooleanVar(value=row.is_emblem)
+        if not row.is_token:
+            ctk.CTkCheckBox(
+                form,
+                text=t("editor.emblem"),
+                variable=self.emblem_var,
+                command=self._apply_emblem,
+            ).grid(row=4, column=1, sticky="w", padx=(10, 0), pady=6)
+
         base_frame = ctk.CTkFrame(self)
         base_frame.grid(row=3, column=0, sticky="nsew", padx=16, pady=10)
         base_frame.grid_columnconfigure(0, weight=1)
         base_frame.grid_rowconfigure(2, weight=1)
 
-        base_title = (
-            t("editor.copy_title")
-            if row.is_copy
-            else t("editor.token_base_title")
-            if row.is_token
-            else t("editor.card_base_title")
+        self.base_title_label = ctk.CTkLabel(base_frame, text=self._base_title(), anchor="w")
+        self.base_title_label.grid(
+            row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 4)
         )
-        ctk.CTkLabel(base_frame, text=base_title,
-                     anchor="w").grid(row=0, column=0, columnspan=2, sticky="ew", padx=10, pady=(10, 4))
 
         placeholder = (
             t("editor.search_token") if row.is_token else t("editor.search_card")
@@ -1189,6 +1246,19 @@ class CardEditor(ctk.CTkToplevel):
             return t("editor.base_current_none")
         return t("editor.base_current", name=self.selected_base.name)
 
+    def _base_title(self) -> str:
+        """Titolo della sezione di scelta della base, secondo il tipo di riga."""
+        if self.emblem_var.get():
+            return t("editor.emblem_title")
+        if self.row.is_copy:
+            return t("editor.copy_title")
+        if self.row.is_token:
+            return t("editor.token_base_title")
+        return t("editor.card_base_title")
+
+    def _apply_emblem(self) -> None:
+        self.base_title_label.configure(text=self._base_title())
+
     def _on_search(self, _event=None) -> None:
         query = self.search_entry.get().strip()
         if not query:
@@ -1222,7 +1292,8 @@ class CardEditor(ctk.CTkToplevel):
         if not name:
             messagebox.showwarning(t("editor.missing_name_title"), t("editor.missing_name_text"))
             return
-        if self.selected_base is None and not self.row.is_copy:
+        self.row.is_emblem = self.emblem_var.get()
+        if self.selected_base is None and not self.row.is_copy and not self.row.is_emblem:
             messagebox.showwarning(t("editor.missing_base_title"), t("editor.missing_base_text"))
             return
         self.row.new_name = name
@@ -1230,7 +1301,7 @@ class CardEditor(ctk.CTkToplevel):
             self.row.rarity = self.rarity_menu.get()
         self.row.artist = self.artist_entry.get().strip()
         self.row.base = self.selected_base
-        if self.selected_base.name.lower() == name.lower():
+        if self.selected_base is not None and self.selected_base.name.lower() == name.lower():
             self.row.score = 100.0
             self.row.reason = "reason.same_name"
         self.saved = True
@@ -1521,10 +1592,11 @@ class ReportDialog(ctk.CTkToplevel):
         header = ctk.CTkLabel(
             self,
             text=t(
-                "report.header",
+                "report.header_emblems" if report.emblems else "report.header",
                 code=code,
                 imported=report.imported,
                 tokens=report.tokens,
+                emblems=report.emblems,
                 scripts=report.scripts_written,
                 images=report.images_written,
                 skipped=report.skipped,

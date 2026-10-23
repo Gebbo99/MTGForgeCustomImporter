@@ -14,6 +14,32 @@ from .carddb import CardInfo
 DEFAULT_RARITY = "C"
 BASIC_LANDS = ("Plains", "Island", "Swamp", "Mountain", "Forest", "Wastes")
 _WORD_SPLIT_RE = re.compile(r"[\s,/\\|._-]+")
+# Le carte multi-faccia numerate portano davanti "N_M_" (carta N, faccia M).
+_INDEX_PREFIX_RE = re.compile(r"^\d+_\d+_|^\d+_(?=[A-Za-z])")
+_REAL_NAME_RE = re.compile(r"^(.*?)\s*\(")
+_CUSTOM_NAME_RE = re.compile(r"^(.*?)\s*\(([^()]*)\)\s*\d*\s*$")
+_NAME_KEY_RE = re.compile(r"[^0-9a-z]+")
+
+
+def custom_name_from_filename(path: Path) -> str:
+    """Nome custom scritto fra parentesi nel nome file.
+
+    I proxy seguono la convenzione "<NomeReale> (<NomeCustom>) [n].ext": qui si
+    isola la parte fra parentesi, che per una faccia e' il nome mostrato. E'
+    l'utente a scriverla, quindi e' piu' affidabile del titolo letto dall'OCR
+    (che su una singola immagine puo' perdere uno spazio).
+    """
+    stem = re.sub(r"\s*\(\d+\)\s*$", "", path.stem).strip()
+    match = _CUSTOM_NAME_RE.search(stem)
+    if match and match.group(2).strip():
+        return match.group(2).strip()
+    return ""
+
+
+def same_name_ignoring_spaces(first: str, second: str) -> bool:
+    """Vero se i due nomi coincidono a meno di spazi e punteggiatura."""
+    first_key = _NAME_KEY_RE.sub("", first.lower())
+    return bool(first_key) and first_key == _NAME_KEY_RE.sub("", second.lower())
 
 
 def name_from_filename(path: Path) -> str:
@@ -23,10 +49,22 @@ def name_from_filename(path: Path) -> str:
     caso il nuovo nome e' quello tra parentesi, altrimenti si usa il nome file.
     """
     stem = re.sub(r"\s*\(\d+\)\s*$", "", path.stem).strip()
-    match = re.search(r"^(.*?)\s*\((.*)\)\s*$", stem)
-    if match and match.group(2).strip():
-        return match.group(2).strip()
-    return stem or path.stem
+    return custom_name_from_filename(path) or stem or path.stem
+
+
+def real_name_from_filename(path: Path) -> str:
+    """Nome reale della carta ricavato dal file (parte prima delle parentesi).
+
+    I proxy seguono la convenzione "<NomeReale> (<NomeCustom>) [n].ext" e le
+    carte multi-faccia anche "N_M_<NomeReale> (<NomeCustom>).ext": qui si isola
+    la parte prima delle parentesi, che per le facce e' il nome ufficiale.
+    Serve a collegare le due immagini (fronte e retro) della stessa carta
+    multi-faccia, che l'utente fornisce come file separati.
+    """
+    stem = re.sub(r"\s*\(\d+\)\s*$", "", path.stem).strip()
+    stem = _INDEX_PREFIX_RE.sub("", stem).strip()
+    match = _REAL_NAME_RE.search(stem)
+    return (match.group(1).strip() if match else stem) or path.stem
 
 
 def detect_basic_land(text: str) -> str:

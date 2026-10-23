@@ -18,6 +18,11 @@ Per ogni token importato il tool:
 I token-copia (Eternalize/Embalm) non hanno uno script: Forge copia la carta e
 usa un'immagine dedicata, quindi il tool copia solo l'immagine e registra la
 riga nella sezione [other] dell'edizione.
+
+Anche gli emblemi dei Planeswalker non hanno uno script: Forge copia l'abilita'
+del Planeswalker e li disegna con la chiave "emblem_<slug del nome ufficiale>",
+risolta sempre tramite la sezione [other] dell'edizione a cui appartiene la
+carta che li ha creati.
 """
 
 from __future__ import annotations
@@ -31,8 +36,10 @@ from pathlib import Path
 
 from PIL import Image
 
-from .carddb import CardDB, CardInfo
+from .carddb import CardDB, CardInfo, faces_of
+from .cards import real_name_from_filename
 from .i18n import t
+from .textutil import normalize_plain
 
 RARITIES = ("L", "C", "U", "R", "M", "S")
 _ENTRY_RE = re.compile(r"^\s*(\d*)(\u2605*)\s+([LCURMSlcurms])\s+(.+?)\s*(@.*)?$")
@@ -40,8 +47,14 @@ _ARTIST_RE = re.compile(r"@\s*(.+)$")
 # Suffisso extraParams delle varianti: " ${"flavorName": "NomeMostrato"}"
 _FLAVOR_RE = re.compile(r"\s*\$\{(.*)\}\s*$")
 _FLAVOR_NAME_RE = re.compile(r'"flavorName"\s*:\s*"([^"]*)"', re.IGNORECASE)
+_FLAVOR_VARIANT_RE = re.compile(r'"variant"\s*:\s*"([^"]*)"', re.IGNORECASE)
+# Separatore tra le facce in un flavorName: Forge spezza su "\\s*//\\s*" e
+# ricompone con " // " (CardRules.findOrCreateVariantForFlavorName).
+_FLAVOR_SPLIT_RE = re.compile(r"\s*//\s*")
 _TOKEN_LINE_RE = re.compile(r"^\s*(\d+)\s+([^\s@]+)")
 _TOKEN_REF_RE = re.compile(r"(TokenScript\$\s*)([^\s|]+)")
+_EMBLEM_WORD_RE = re.compile(r"\bemblem\b", re.IGNORECASE)
+_EMBLEM_IMAGE_RE = re.compile(r"Image\$\s*(emblem_[^\s|]+)", re.IGNORECASE)
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
 
 
@@ -58,6 +71,10 @@ class EditionEntry:
     artist: str = ""
     stars: int = 0
     flavor_name: str = ""
+    # Variante esplicita delle righe di arte oltre la prima di un re-skin:
+    # '${"variant": "..."}'. Punta alla variante creata dalla riga col
+    # flavorName senza rigenerarla (cioe' senza far crashare Forge all'avvio).
+    variant: str = ""
     raw: str = ""
 
     @property
@@ -168,6 +185,7 @@ class Edition:
         stars: int = 0,
         artist: str = "",
         flavor_name: str = "",
+        variant: str = "",
     ) -> EditionEntry:
         rarity = (rarity or "R").upper()
         if rarity not in RARITIES:
@@ -179,6 +197,7 @@ class Edition:
             artist=artist,
             stars=stars,
             flavor_name=flavor_name,
+            variant=variant,
         )
         entry.raw = _format_entry(entry)
         self.entries.append(entry)
@@ -281,11 +300,16 @@ def _parse_entry(line: str) -> EditionEntry | None:
     collector, stars, rarity, rest, tail = match.groups()
     text = f"{rest} {tail}".strip() if tail else rest.strip()
     flavor_name = ""
+    variant = ""
     flavor_match = _FLAVOR_RE.search(text)
     if flavor_match:
-        name_match = _FLAVOR_NAME_RE.search(flavor_match.group(1))
+        extra = flavor_match.group(1)
+        name_match = _FLAVOR_NAME_RE.search(extra)
         if name_match:
             flavor_name = name_match.group(1)
+        variant_match = _FLAVOR_VARIANT_RE.search(extra)
+        if variant_match:
+            variant = variant_match.group(1)
         text = text[: flavor_match.start()].strip()
     artist = ""
     artist_match = _ARTIST_RE.search(text)
@@ -299,6 +323,7 @@ def _parse_entry(line: str) -> EditionEntry | None:
         artist=artist,
         stars=len(stars),
         flavor_name=flavor_name,
+        variant=variant,
         raw=line,
     )
 
@@ -308,7 +333,11 @@ def _format_entry(entry: EditionEntry) -> str:
     text = f"{prefix} {entry.rarity} {entry.name}".strip()
     if entry.artist:
         text += f" @{entry.artist}"
-    if entry.flavor_name:
+    # Forge rifiuta una riga che dichiari sia flavorName sia variant: la riga
+    # della variante esplicita scrive solo il campo variant.
+    if entry.variant:
+        text += f' ${{"variant": "{entry.variant}"}}'
+    elif entry.flavor_name:
         text += f' ${{"flavorName": "{entry.flavor_name}"}}'
     return text
 
@@ -419,6 +448,38 @@ def forge_image_slug(card_name: str) -> str:
     return card_name.replace(",", "").replace(" ", "_").lower()
 
 
+def emblem_hint(*texts: str) -> bool:
+    """Vero se un nome file o un titolo letto indicano un emblema."""
+    return any(_EMBLEM_WORD_RE.search(text or "") for text in texts)
+
+
+def emblem_base_name(text: str) -> str:
+    """Nome del Planeswalker da un testo che descrive un emblema.
+
+    Da "Emblem — Chandra, Torch of Defiance" (o dal nome file
+    "emblem_chandra_torch_of_defiance") si ricava il nome con cui cercare la
+    carta base a cui l'emblema appartiene.
+    """
+    cleaned = _EMBLEM_WORD_RE.sub("", text or "", count=1)
+    cleaned = re.sub(r"[_]+", " ", cleaned)
+    return cleaned.strip(" \u2014\u2013-:.,")
+
+
+def emblem_image_key(card_name: str, base_script: str = "") -> str:
+    """Chiave immagine dell'emblema di un Planeswalker.
+
+    Forge disegna l'emblema con la chiave "emblem_<slug>": la prende dal campo
+    Image$ dell'abilita' che crea l'emblema oppure, se assente, dal nome
+    dichiarato ("Name$ Emblem — Chandra, Torch of Defiance"). Lo slug e' quello
+    del nome ufficiale della carta base, perche' il re-skin condivide il suo
+    script e quindi la sua chiave.
+    """
+    match = _EMBLEM_IMAGE_RE.search(base_script or "")
+    if match:
+        return match.group(1)
+    return f"emblem_{forge_image_slug(card_name)}"
+
+
 def copy_mechanics_in(cards_dir: Path, names: set[str]) -> dict[str, tuple[str, str]]:
     """{nome carta (lower): (prefisso, nome)} per i token-copia del set.
 
@@ -464,6 +525,8 @@ class ImportItem:
     is_copy: bool = False
     copy_prefix: str = ""
     copy_card: str = ""
+    # Emblema di un Planeswalker: solo immagine, registrata in [other].
+    is_emblem: bool = False
 
 
 @dataclass
@@ -478,6 +541,7 @@ class ImportOptions:
 class ImportReport:
     imported: int = 0
     tokens: int = 0
+    emblems: int = 0
     scripts_written: int = 0
     images_written: int = 0
     skipped: int = 0
@@ -526,9 +590,73 @@ def forge_filename(name: str) -> str:
     return "".join(ch for ch in stripped if ch not in '"\\/:?')
 
 
+def java_hash(text: str) -> int:
+    """String.hashCode() di Java: intero a 32 bit con segno.
+
+    Forge nomina la variante di un re-skin "FlavorName" + hashCode del nome
+    mostrato ricomposto con " // ": il tool deve calcolare lo stesso valore per
+    puntare alla variante con ${"variant": ...} invece di ripetere il flavorName.
+    """
+    result = 0
+    for char in text:
+        result = (result * 31 + ord(char)) & 0xFFFFFFFF
+    return result - 0x100000000 if result >= 0x80000000 else result
+
+
+def _joined_flavor_name(flavor_name: str) -> str:
+    """Nome mostrato come lo ricompone Forge: facce separate da " // ".
+
+    Forge spezza il flavorName su "\\s*//\\s*" e lo ricuce con " // ", quindi
+    gli spazi attorno al separatore non contano (CardRules.
+    findOrCreateVariantForFlavorName).
+    """
+    parts = [part.strip() for part in _FLAVOR_SPLIT_RE.split(flavor_name.strip())]
+    while parts and parts[-1] == "":
+        parts.pop()
+    return " // ".join(parts)
+
+
+def _platform_variant(edition_code: str) -> str:
+    """Variante che Forge impone per codice edizione (CardDb.addSetCard).
+
+    I set "OM*" (Alchemy) e "SLX" (UniversesWithin) usano una variante fissa
+    invece del nome derivato dall'hash del nome mostrato.
+    """
+    code = (edition_code or "").strip()
+    if code.startswith("OM"):
+        return "Alchemy"
+    if code == "SLX":
+        return "UniversesWithin"
+    return ""
+
+
+def variant_name(flavor_name: str, edition_code: str = "") -> str:
+    """Nome della variante creata da Forge per un re-skin (flavorName).
+
+    E' il nome con cui si punta alla variante nelle righe di arte successive
+    alla prima, con ${"variant": "..."}: cosi' Forge riusa la variante creata
+    dalla riga col flavorName invece di rigenerarla (la rigenerazione ripetuta
+    riusa una variante gia' popolata e fa crashare l'avvio di Forge con
+    UnsupportedOperationException in CardFace.assignMissingFieldsToVariant).
+    """
+    platform = _platform_variant(edition_code)
+    if platform:
+        return platform
+    return f"FlavorName{java_hash(_joined_flavor_name(flavor_name))}"
+
+
 def image_file_name(card_name: str, art_index: int, art_total: int, extension: str) -> str:
     number = "" if art_total <= 1 else str(art_index)
     return f"{forge_filename(card_name)}{number}.fullborder{extension}"
+
+
+def _face_key(card: CardInfo) -> str:
+    """Chiave con cui si riconosce la stessa carta multi-faccia.
+
+    Si usa il nome e non la entry: la stessa carta puo' comparire in piu' set
+    (quindi con piu' entry) e fronte e retro devono abbinarsi comunque.
+    """
+    return normalize_plain(card.name)
 
 
 class Importer:
@@ -565,6 +693,13 @@ class Importer:
             edition.name = edition_name
         edition.code = edition.code or edition_code
 
+        # Righe presenti prima di questo import: la pulizia delle righe superate
+        # agisce solo su queste. Le righe scritte adesso non vanno toccate,
+        # altrimenti un lotto i cui nomi vengono letti in modo leggermente
+        # diverso (es. refuso OCR su una sola immagine) cancellerebbe le righe
+        # e le immagini scritte poco prima.
+        pre_existing = list(edition.entries)
+
         code = edition.code.strip() or edition_code
         pics_target = self.pics_dir / code
         cards_dir = self.custom_dir / "cards"
@@ -572,8 +707,14 @@ class Importer:
         collapse_extensions(pics_target)
         collapse_extensions(self.token_pics_dir / code)
 
-        card_items = [item for item in items if not item.is_token]
-        token_items = [item for item in items if item.is_token]
+        card_items = [item for item in items if not item.is_token and not item.is_emblem]
+        token_items = [item for item in items if item.is_token and not item.is_emblem]
+        emblem_items = [item for item in items if item.is_emblem]
+
+        # Le carte multi-faccia arrivano come due immagini distinte (fronte e
+        # retro). Il retro non e' una carta a se': viene abbinato al fronte
+        # della stessa carta base e riscritto per ogni arte del fronte.
+        card_items, backs_by_base, used_backs = self._split_faces(card_items)
 
         # Quante immagini hanno lo stesso nome mostrato in questo lotto: piu' di
         # una significa che l'utente sta importando piu' varianti insieme.
@@ -595,38 +736,76 @@ class Importer:
                 report.skipped += 1
                 report.log(t("gen.skipped_card_base", name=item.image_path.name))
                 continue
-
             art_seen[key] = art_seen.get(key, 0) + 1
             art_total = totals.get(key, 1)
             art_index = art_seen[key]
             item.stars = art_index - 1
+            # Nome della carta base: unito per le multi-faccia ("Fronte // Retro").
             base_name = item.base.name.strip()
+            # Nome con cui Forge registra la carta nella riga [cards]: per una
+            # multi-faccia non Split e' il solo nome della faccia anteriore.
+            row_name = item.base.forge_name
+
+            # Carta multi-faccia: il nome mostrato deve essere "Fronte // Retro".
+            # Il retro puo' arrivare come immagine a parte (abbinata tramite il
+            # nome reale nel file), altrimenti va scritto per intero dal nome.
+            faces = faces_of(item.base)
+            back: ImportItem | None = None
+            if faces:
+                if " // " in name:
+                    display = name
+                else:
+                    back = self._pick_back(backs_by_base, item.base, art_index, used_backs)
+                    if back is None:
+                        report.skipped += 1
+                        report.log(
+                            t("gen.skipped_multiface", name=item.image_path.name, base=item.base.name)
+                        )
+                        continue
+                    display = f"{name} // {back.new_name.strip()}"
+            else:
+                display = name
+
             # Re-skin: la riga usa le regole della carta base e il nome nuovo come
             # flavorName, cosi' Forge mostra la nuova arte fra le varianti della
             # carta base invece che come carta a se' stante.
-            flavor_name = "" if name.lower() == base_name.lower() else name
+            flavor_name = "" if display.lower() == base_name.lower() else display
+
+            # Nome file dell'immagine del fronte: per una multi-faccia Forge lo
+            # cerca col solo nome della faccia anteriore ("Fio and Levania"), non
+            # col nome mostrato unito ("Fio and Levania // Explore Memories"), che
+            # verrebbe salvato con gli spazi al posto del separatore.
+            image_name = display.split(" // ")[0].strip() if faces else display
 
             if art_total == 1:
                 # Una sola immagine con questo nome: re-import idempotente. Se la
                 # carta esiste gia' la riga viene aggiornata e l'immagine riusata,
                 # senza accumulare copie duplicate ad ogni ri-importazione.
-                existing = edition.find_cards(name)
+                existing = edition.find_cards(display)
                 collector = (
                     int(existing[0].collector)
                     if existing and existing[0].collector.isdigit()
                     else edition.next_collector()
                 )
-                for entry in existing:
-                    edition.remove_card(entry)
-                self._remove_numbered_variants(pics_target, name)
-                item.image_dest = self._place_image(
-                    item, pics_target, 1, 1, options, report
+                self._drop_stale_cards(
+                    edition, pics_target, pre_existing, display, {base_name, row_name}, faces
                 )
+                self._remove_legacy_front_images(pics_target, display, image_name)
+                self._remove_numbered_variants(pics_target, image_name)
+                if faces:
+                    self._remove_numbered_variants(pics_target, faces[1])
+                item.image_dest = self._place_image(
+                    item, pics_target, 1, 1, options, report, name=image_name
+                )
+                if back is not None:
+                    self._place_back_image(
+                        back, pics_target, faces[1], 1, 1, options, report
+                    )
                 edition.add_card(
-                    base_name, item.rarity, collector, 0, item.artist, flavor_name=flavor_name
+                    row_name, item.rarity, collector, 0, item.artist, flavor_name=flavor_name
                 )
                 if flavor_name:
-                    item.notes.append(t("gen.variant_of", base=base_name, name=name))
+                    item.notes.append(t("gen.variant_of", base=row_name, name=display))
                     if self.db.by_name(name) is not None:
                         item.notes.append(t("gen.name_official"))
                 else:
@@ -635,38 +814,201 @@ class Importer:
                 # Piu' immagini con lo stesso nome importate insieme: ognuna
                 # diventa una variante (arte) della stessa carta.
                 if art_seen[key] == 1:
-                    self._ensure_numbered(pics_target, name)
-                    for entry in edition.find_cards(name):
-                        edition.remove_card(entry)
+                    self._drop_stale_cards(
+                        edition, pics_target, pre_existing, display, {base_name, row_name}, faces
+                    )
+                    self._remove_legacy_front_images(pics_target, display, image_name)
+                    self._ensure_numbered(pics_target, image_name)
+                    if faces:
+                        self._ensure_numbered(pics_target, faces[1])
                 collector = edition.next_collector()
                 item.image_dest = self._place_image(
-                    item, pics_target, art_index, art_total, options, report
+                    item, pics_target, art_index, art_total, options, report, name=image_name
                 )
+                if back is not None:
+                    self._place_back_image(
+                        back, pics_target, faces[1], art_index, art_total, options, report
+                    )
+                # Forge ricrea (e riusa) la variante quando piu' righe portano lo
+                # stesso flavorName: dalla seconda arte in poi si punta con
+                # ${"variant": ...} alla variante creata dalla prima, evitando il
+                # crash UnsupportedOperationException all'avvio di Forge.
+                row_flavor = flavor_name
+                row_variant = ""
+                if flavor_name and art_index > 1:
+                    row_flavor = ""
+                    row_variant = variant_name(flavor_name, code)
                 edition.add_card(
-                    base_name,
+                    row_name,
                     item.rarity,
                     collector,
                     item.stars,
                     item.artist,
-                    flavor_name=flavor_name,
+                    flavor_name=row_flavor,
+                    variant=row_variant,
                 )
                 if flavor_name:
                     item.notes.append(
-                        t("gen.variant_of_art", base=base_name, name=name, index=art_index, total=art_total)
+                        t("gen.variant_of_art", base=row_name, name=display, index=art_index, total=art_total)
                     )
                 else:
                     item.notes.append(t("gen.same_rules"))
+            if back is not None:
+                item.notes.append(t("gen.face_pair", back=back.new_name.strip()))
             report.imported += 1
+
+        self._report_orphan_backs(backs_by_base, used_backs, report)
 
         copy_mechanics = self._copy_mechanics(edition, cards_dir)
         token_refs = self._place_tokens(
             token_items, edition, code, options, report, copy_mechanics
         )
         self._rewire_token_refs(edition, cards_dir, token_refs, report)
+        self._place_emblems(emblem_items, edition, code, options, report)
 
         edition.save()
         report.log(t("gen.edition_updated", path=edition.path))
         return report
+
+    # ---------- carte multi-faccia ----------
+
+    def _split_faces(
+        self, items: list[ImportItem]
+    ) -> tuple[list[ImportItem], dict[str, list[ImportItem]], set[int]]:
+        """Separa i retro delle carte multi-faccia dalle altre immagini.
+
+        Il retro di un proxy multi-faccia e' un file a parte che porta il nome
+        reale della faccia posteriore ("Explore the Vastlands"): qui viene
+        riconosciuto e raccolto per carta base, cosi' non finisce nel ciclo
+        normale (dove verrebbe preso per una variante a se' stante).
+        """
+        normal: list[ImportItem] = []
+        backs: dict[str, list[ImportItem]] = {}
+        for item in items:
+            lookup = self._face_lookup(item)
+            if (
+                lookup is not None
+                and lookup[1] == 1
+                and item.base is not None
+                and _face_key(item.base) == _face_key(lookup[0])
+            ):
+                backs.setdefault(_face_key(item.base), []).append(item)
+            else:
+                normal.append(item)
+        return normal, backs, set()
+
+    def _face_lookup(self, item: ImportItem) -> tuple[CardInfo, int] | None:
+        """Carta multi-faccia e indice della faccia indicata dal nome file."""
+        if self.db is None:
+            return None
+        real = real_name_from_filename(item.image_path)
+        if not real:
+            return None
+        return self.db.by_face(real)
+
+    @staticmethod
+    def _pick_back(
+        backs: dict[str, list[ImportItem]],
+        base: CardInfo,
+        art_index: int,
+        used: set[int],
+    ) -> ImportItem | None:
+        """Retro da abbinare a questa arte del fronte.
+
+        Con un solo retro importato lo si usa per tutte le arti (l'arte cambia
+        solo sul fronte); con piu' retro si abbina per ordine.
+        """
+        available = backs.get(_face_key(base))
+        if not available:
+            return None
+        back = available[0] if len(available) == 1 else available[min(art_index - 1, len(available) - 1)]
+        used.add(id(back))
+        return back
+
+    @staticmethod
+    def _report_orphan_backs(
+        backs: dict[str, list[ImportItem]], used: set[int], report: ImportReport
+    ) -> None:
+        """Segnala i retro importati senza il fronte corrispondente."""
+        for items in backs.values():
+            for item in items:
+                if id(item) not in used:
+                    report.skipped += 1
+                    report.log(
+                        t("gen.skipped_back_only", name=item.image_path.name, base=item.base.name)
+                    )
+
+    def _place_back_image(
+        self,
+        back: ImportItem,
+        pics_target: Path,
+        back_name: str,
+        art_index: int,
+        art_total: int,
+        options: ImportOptions,
+        report: ImportReport,
+    ) -> None:
+        """Scrive il retro col nome ufficiale della faccia posteriore.
+
+        Forge cerca il retro col nome ufficiale ("Explore the Vastlands"), non
+        col nome mostrato; il numero segue l'arte, cosi' ogni arte del fronte ha
+        il suo retro (con un solo retro fornito il file viene duplicato).
+        """
+        self._place_image(
+            back, pics_target, art_index, art_total, options, report, name=back_name
+        )
+
+    @staticmethod
+    def _stale_cards(
+        entries: list[EditionEntry], display: str, row_names: set[str], faces: list[str]
+    ) -> list[EditionEntry]:
+        """Righe superate da un import precedente della stessa carta mostrata.
+
+        Oltre alla riga con lo stesso nome mostrato (idempotenza normale) si
+        recuperano quelle scritte da versioni precedenti del tool con un nome
+        diverso per la stessa carta: per una carta multi-faccia l'identita' del
+        re-skin e' la faccia anteriore, quindi una riga col solo nome del fronte
+        (o con la stessa carta base ma un nome superato) e' una copia stantia.
+        Senza la pulizia Forge la mostra come carta a se', collegata alla vecchia
+        carta base e priva del retro.
+
+        ``row_names`` elenca i nomi carta base ammessi: quello con cui Forge
+        registra la carta adesso e quello usato dalle versioni precedenti.
+
+        Si cerca solo fra le righe indicate (quelle presenti prima dell'import):
+        le righe scritte adesso non sono mai superate.
+        """
+        target = display.strip().lower()
+        row_targets = {name.strip().lower() for name in row_names if name.strip()}
+        # Identita' del re-skin: la faccia anteriore del nome mostrato, cioe' il
+        # nome custom del fronte ("FronteCustom // RetroCustom" -> "FronteCustom").
+        front = display.split(" // ")[0].strip().lower()
+        stale: list[EditionEntry] = []
+        for entry in entries:
+            name = entry.card_name.strip().lower()
+            if (
+                name == target
+                or (faces and name.split(" // ")[0].strip() == front)
+                or (faces and entry.name.strip().lower() in row_targets)
+            ):
+                stale.append(entry)
+        return stale
+
+    def _drop_stale_cards(
+        self,
+        edition: Edition,
+        pics_target: Path,
+        pre_existing: list[EditionEntry],
+        display: str,
+        row_names: set[str],
+        faces: list[str],
+    ) -> None:
+        """Rimuove le righe superate della carta e le immagini che usavano."""
+        target = display.strip().lower()
+        for entry in self._stale_cards(pre_existing, display, row_names, faces):
+            edition.remove_card(entry)
+            if entry.card_name.strip().lower() != target:
+                self._remove_card_images(pics_target, entry.card_name)
 
     # ---------- immagini ----------
 
@@ -681,6 +1023,38 @@ class Importer:
         pattern = re.compile(re.escape(prefix) + r"\d+\.fullborder\.[a-z0-9]+$", re.IGNORECASE)
         if not pics_target.is_dir():
             return
+        for path in pics_target.iterdir():
+            if path.is_file() and pattern.match(path.name):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    def _remove_legacy_front_images(
+        self, pics_target: Path, display: str, image_name: str
+    ) -> None:
+        """Elimina le immagini del fronte salvate col nome mostrato unito.
+
+        Versioni precedenti del tool salvavano il fronte di una multi-faccia col
+        nome completo ("Fio and Levania  Explore Memories1.fullborder.jpg", col
+        separatore ridotto a spazi): ora l'immagine usa il solo nome della faccia
+        anteriore, quindi i file col vecchio nome resterebbero orfani nella cache.
+        """
+        if forge_filename(display) == forge_filename(image_name):
+            return
+        self._remove_card_images(pics_target, display)
+
+    def _remove_card_images(self, pics_target: Path, card_name: str) -> None:
+        """Elimina le immagini di una carta: quella semplice e le varianti numerate.
+
+        Quando una riga scritta da un import precedente viene sostituita, le sue
+        immagini vanno tolte dalla cache: col vecchio nome resterebbero orfane e,
+        se il nome mostrato e' cambiato, Forge le userebbe per una carta fantasma.
+        """
+        prefix = forge_filename(card_name)
+        if not pics_target.is_dir():
+            return
+        pattern = re.compile(re.escape(prefix) + r"\d*\.fullborder\.[a-z0-9]+$", re.IGNORECASE)
         for path in pics_target.iterdir():
             if path.is_file() and pattern.match(path.name):
                 try:
@@ -705,11 +1079,19 @@ class Importer:
         art_total: int,
         options: ImportOptions,
         report: ImportReport,
+        name: str | None = None,
     ) -> Path:
+        """Scrive l'immagine in Cache/pics/cards col nome file di Forge.
+
+        ``name`` permette di scrivere il retro di una carta multi-faccia col
+        nome ufficiale della faccia posteriore invece che col nome mostrato.
+        """
         source = item.image_path
         kept_alpha = _has_alpha(source)
         extension = ".png" if (kept_alpha and not options.crop) else ".jpg"
-        destination = pics_target / image_file_name(item.new_name.strip(), art_index, art_total, extension)
+        destination = pics_target / image_file_name(
+            (name or item.new_name).strip(), art_index, art_total, extension
+        )
 
         if source.resolve() == destination.resolve():
             report.images_written += 1
@@ -885,6 +1267,53 @@ class Importer:
         item.notes.append(t("gen.copy_token", prefix=prefix, card=card_name))
         report.tokens += 1
         report.log(t("gen.copy_token_line", prefix=prefix, card=card_name, collector=collector))
+
+    def _place_emblems(
+        self,
+        items: list[ImportItem],
+        edition: Edition,
+        code: str,
+        options: ImportOptions,
+        report: ImportReport,
+    ) -> None:
+        """Registra le immagini degli emblemi dei Planeswalker del set.
+
+        Un emblema non ha uno script: Forge copia l'abilita' del Planeswalker e
+        lo disegna con la chiave "emblem_<slug>", che risolve nella sezione
+        [other] dell'edizione della carta che lo ha creato (il Planeswalker del
+        set). Il tool copia quindi solo l'immagine e registra la riga, come per
+        i token-copia: la chiave e' quella del nome ufficiale della carta base,
+        perche' il re-skin condivide il suo script.
+        """
+        if not items:
+            return
+        pics_target = self.token_pics_dir / code
+        for item in items:
+            name = item.new_name.strip()
+            if not name:
+                report.skipped += 1
+                report.log(t("gen.skipped_token_name", name=item.image_path.name))
+                continue
+            if not item.base:
+                report.skipped += 1
+                report.log(t("gen.skipped_emblem_base", name=item.image_path.name))
+                continue
+            try:
+                base_script = self.db.script_text(item.base)
+            except (KeyError, OSError):
+                base_script = ""
+            key = emblem_image_key(item.base.name.strip(), base_script)
+            if edition.other_count(key):
+                collector = _other_collector_of(edition, key)
+            else:
+                collector = edition.next_other_collector()
+                edition.add_other(key, collector, item.artist)
+            item.image_dest = self._place_token_image(
+                item, pics_target, collector, key, options, report
+            )
+            item.notes.append(t("gen.emblem", card=item.base.name))
+            report.emblems += 1
+            report.log(t("gen.emblem_line", card=item.base.name, collector=collector))
 
     def _place_token_image(
         self,

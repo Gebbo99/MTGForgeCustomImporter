@@ -63,6 +63,14 @@ class Matcher:
 
     # ---------- riconoscimento ----------
 
+    def match_name(self, text: str) -> tuple[CardInfo | None, float]:
+        """Migliore carta per nome, con punteggio.
+
+        Usato per agganciare un emblema al suo Planeswalker partendo dal nome
+        ricavato dal file o dal titolo letto.
+        """
+        return self._best_name(text)
+
     def match(self, reading: CardReading, limit: int = 6) -> list[Candidate]:
         results: list[Candidate] = []
         seen: set[str] = set()

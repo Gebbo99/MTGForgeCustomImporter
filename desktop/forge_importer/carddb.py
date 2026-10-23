@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .textutil import normalize_for_compare, normalize_plain
 
-CACHE_VERSION = 3
+CACHE_VERSION = 5
 
 
 @dataclass(frozen=True)
@@ -26,14 +26,51 @@ class CardInfo:
     pt: str
     entry: str
     source: str
+    # Carta con piu' facce: il nome e' "Fronte // Retro" e Forge pretende che
+    # un eventuale flavorName contenga " // ".
+    multiface: bool = False
+    # Valore della riga "AlternateMode:" dello script (DoubleFaced, Modal,
+    # Split, Flip, Adventure, ...): dice come Forge registra il nome della
+    # carta, quindi come va scritta la riga [cards] dell'edizione.
+    alt_mode: str = ""
 
     @property
     def oracle_norm(self) -> str:
         return normalize_for_compare(self.oracle)
 
+    @property
+    def forge_name(self) -> str:
+        """Nome con cui Forge registra la carta (CardRules.getName()).
+
+        Solo le carte Split hanno per nome "Fronte // Retro" (aggregazione
+        COMBINE); tutte le altre multi-faccia (DoubleFaced, Modal, Flip, ...)
+        sono note col solo nome della faccia anteriore. Usare il nome unito per
+        queste ultime fa scartare la riga dell'edizione come "carta mancante" e
+        la carta non compare in Forge.
+        """
+        if not self.multiface or self.alt_mode.strip().lower() == "split":
+            return self.name
+        return self.name.split(" // ")[0].strip()
+
+
+def faces_of(card: CardInfo) -> list[str]:
+    """Nomi delle singole facce di una carta multi-faccia.
+
+    Il nome di una carta multi-faccia e' "Fronte // Retro": qui si separano le
+    due facce (indice 0 = fronte, 1 = retro). Per le carte a faccia singola
+    restituisce una lista vuota.
+    """
+    if not card.multiface:
+        return []
+    return [part.strip() for part in card.name.split(" // ") if part.strip()]
+
 
 def _parse_script(text: str) -> dict[str, str]:
+    # Le carte multi-faccia hanno due righe "Name:" (fronte, poi retro, separate
+    # dalla riga ALTERNATE): Forge le registra con il nome "Fronte // Retro",
+    # quindi le si unisce invece di tenere solo l'ultima.
     fields: dict[str, str] = {}
+    names: list[str] = []
     current_key: str | None = None
     for raw_line in text.splitlines():
         if not raw_line.strip():
@@ -43,13 +80,18 @@ def _parse_script(text: str) -> dict[str, str]:
             key = key.strip()
         else:
             key, value = "", raw_line.strip()
-        if key in {"Name", "Oracle", "Types", "ManaCost", "PT"}:
+        if key == "Name":
+            names.append(value.strip())
+            current_key = key
+        elif key in {"Oracle", "Types", "ManaCost", "PT", "AlternateMode"}:
             fields[key] = value.strip()
             current_key = key
         elif current_key == "Oracle":
             fields["Oracle"] = (fields.get("Oracle", "") + " " + raw_line.strip()).strip()
         else:
             current_key = None
+    if names:
+        fields["Name"] = " // ".join(names)
     return fields
 
 
@@ -75,6 +117,10 @@ class CardDB:
         self.cards = cards
         self._settings_path = settings_path
         self._by_name: dict[str, CardInfo] = {}
+        # Indice delle singole facce delle carte multi-faccia: {nome faccia:
+        # (carta, indice)}. Serve a collegare le due immagini (fronte e retro)
+        # della stessa carta, che l'utente fornisce come file separati.
+        self._by_face: dict[str, tuple[CardInfo, int]] = {}
         # Archivio aperto una sola volta: script_text() legge uno script per
         # chiamata e riaprire il .zip ogni volta costa decine di millisecondi
         # (con le centinaia di carte di un set l'attesa congelava l'interfaccia).
@@ -82,6 +128,10 @@ class CardDB:
         for card in cards:
             key = normalize_plain(card.name)
             self._by_name.setdefault(key, card)
+            for index, face in enumerate(faces_of(card)):
+                face_key = normalize_plain(face)
+                if face_key:
+                    self._by_face.setdefault(face_key, (card, index))
 
     # ---------- caricamento ----------
 
@@ -108,6 +158,8 @@ class CardDB:
                     pt=fields.get("PT", ""),
                     entry=entry,
                     source=source_label,
+                    multiface=" // " in name,
+                    alt_mode=fields.get("AlternateMode", ""),
                 )
             )
         cards.sort(key=lambda c: c.name)
@@ -139,6 +191,8 @@ class CardDB:
                         pt=fields.get("PT", ""),
                         entry=entry,
                         source=source_label,
+                        multiface=" // " in name,
+                        alt_mode=fields.get("AlternateMode", ""),
                     )
                 )
         cards.sort(key=lambda c: c.name)
@@ -168,6 +222,8 @@ class CardDB:
                 pt=item.get("pt", ""),
                 entry=item.get("entry", ""),
                 source=item.get("source", ""),
+                multiface=item.get("multiface", False),
+                alt_mode=item.get("alt_mode", ""),
             )
             for item in data.get("cards", [])
         ]
@@ -185,6 +241,8 @@ class CardDB:
                     "pt": c.pt,
                     "entry": c.entry,
                     "source": c.source,
+                    "multiface": c.multiface,
+                    "alt_mode": c.alt_mode,
                 }
                 for c in self.cards
             ],
@@ -200,6 +258,16 @@ class CardDB:
 
     def by_name(self, name: str) -> CardInfo | None:
         return self._by_name.get(normalize_plain(name))
+
+    def by_face(self, name: str) -> tuple[CardInfo, int] | None:
+        """Carta multi-faccia e indice della faccia con questo nome ufficiale.
+
+        Indice 0 = fronte, 1 = retro. Il nome file di un'immagine porta il nome
+        reale della faccia ("Wandering Archaic", "Explore the Vastlands"): con
+        questo indice le due immagini della stessa carta vengono collegate.
+        """
+        key = normalize_plain(name)
+        return self._by_face.get(key) if key else None
 
     def names(self) -> list[str]:
         return [c.name for c in self.cards]
