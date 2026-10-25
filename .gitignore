@@ -9,6 +9,7 @@ venv/
 build/
 dist/
 *.spec.bak
+/*.exe
 
 # --- Artefatti locali ---
 *.log

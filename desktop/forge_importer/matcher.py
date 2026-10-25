@@ -253,10 +253,11 @@ class TokenMatcher:
             for card in self.db.cards
             if normalize_plain(card.name) == key and self._shape_matches(card, reading)
         ]
+        variants = self._narrow_by_rules(variants, reading)
         if len(variants) < 2:
             return
         for candidate in results:
-            if normalize_plain(candidate.card.name) == key:
+            if any(candidate.card.entry == variant.entry for variant in variants):
                 candidate.reason = "reason.token_ambiguous"
 
     def _best_name(self, text: str, reading: CardReading) -> Candidate | None:
@@ -295,6 +296,7 @@ class TokenMatcher:
         if len(same) < 2:
             return Candidate(card=card, score=score, reason="reason.token_name")
         matching = [c for c in same if self._shape_matches(c, reading)] or same
+        matching = self._narrow_by_rules(matching, reading)
         if len(matching) == 1:
             return Candidate(card=matching[0], score=score, reason="reason.token_name")
         return Candidate(
@@ -302,6 +304,44 @@ class TokenMatcher:
             score=min(score, 88.0),
             reason="reason.token_ambiguous",
         )
+
+    def _narrow_by_rules(self, cards: list[CardInfo], reading: CardReading) -> list[CardInfo]:
+        """Riduce gli omonimi usando il testo regole quando basta a distinguerli.
+
+        Molti token condividono nome, tipi e P/T; in EVA succede ad esempio con
+        alcuni "Angel" e soprattutto con i "Pilot". In questi casi il testo
+        Oracle e' l'unico indizio affidabile rimasto. L'OCR sui token e' spesso
+        rumoroso, quindi il filtraggio parte solo quando il miglior match e'
+        chiaramente sopra gli altri.
+        """
+        if len(cards) < 2:
+            return cards
+        query = normalize_for_compare(reading.rules_text)
+        if len(query) < 12:
+            return cards
+
+        exact = [card for card in cards if normalize_for_compare(card.oracle) == query]
+        if len(exact) == 1:
+            return exact
+
+        scored: list[tuple[float, CardInfo]] = []
+        for card in cards:
+            oracle = normalize_for_compare(card.oracle)
+            if not oracle:
+                continue
+            set_score = fuzz.token_set_ratio(query, oracle)
+            sort_score = fuzz.token_sort_ratio(query, oracle)
+            scored.append((0.65 * set_score + 0.35 * sort_score, card))
+
+        if len(scored) < 2:
+            return cards
+
+        scored.sort(key=lambda item: -item[0])
+        best_score, best_card = scored[0]
+        second_score = scored[1][0]
+        if best_score < 82 or (best_score - second_score) < 6:
+            return cards
+        return [best_card]
 
     @staticmethod
     def _shape_matches(card: CardInfo, reading: CardReading) -> bool:

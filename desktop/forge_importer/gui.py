@@ -29,7 +29,7 @@ import customtkinter as ctk
 from . import adb
 from . import i18n
 from . import paths as P
-from .carddb import CardDB, CardInfo
+from .carddb import CardDB, CardInfo, faces_of
 from .cards import (
     DEFAULT_RARITY,
     custom_name_from_filename,
@@ -84,9 +84,17 @@ class Row:
     copy_card: str = ""
     copy_prefix: str = ""
     is_emblem: bool = False
+    # Retro di una carta a due lati collegato a mano: linked_front e' l'iid
+    # della riga del fronte a cui appartiene (vuoto = non collegato).
+    is_back: bool = False
+    linked_front: str = ""
 
     def status(self) -> tuple[str, str]:
         """(chiave di traduzione dello stato, tag colore) per evidenziare le anomalie."""
+        if self.is_back:
+            return "state.back_linked" if self.linked_front else "state.back_unlinked", (
+                "ok" if self.linked_front else "warn"
+            )
         if self.reading is None:
             return "state.read_error", "bad"
         if self.is_emblem:
@@ -153,7 +161,7 @@ class ForgeImporterApp(ctk.CTk):
     def _build_toolbar(self) -> None:
         bar = ctk.CTkFrame(self)
         bar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 4))
-        for col in range(7):
+        for col in range(8):
             bar.grid_columnconfigure(col, weight=0)
         bar.grid_columnconfigure(3, weight=1)
 
@@ -187,8 +195,12 @@ class ForgeImporterApp(ctk.CTk):
         self.language_menu.set(label_for_code(i18n.get_language()))
         self.language_menu.pack(side="left")
 
-        ctk.CTkButton(bar, text=t("toolbar.settings"), width=110, command=self.open_settings).grid(
+        ctk.CTkButton(bar, text=t("toolbar.link_faces"), width=160, command=self.link_faces).grid(
             row=0, column=5, padx=10, pady=10
+        )
+
+        ctk.CTkButton(bar, text=t("toolbar.settings"), width=110, command=self.open_settings).grid(
+            row=0, column=6, padx=10, pady=10
         )
 
     def _build_info_bar(self) -> None:
@@ -553,6 +565,12 @@ class ForgeImporterApp(ctk.CTk):
                 continue
             entry = copies.get(row.new_name.strip().lower())
             if entry is None:
+                # Se l'OCR non legge il titolo il proxy del token-copia si
+                # chiama come la carta ("<NomeReale> (<Tipo>) (Token)"): il
+                # nome reale nel file aggancia comunque la copia.
+                real = real_name_from_filename(row.image_path).strip().lower()
+                entry = copies.get(real)
+            if entry is None:
                 if row.is_copy or row.copy_prefix:
                     row.is_copy = False
                     row.copy_card = ""
@@ -758,6 +776,13 @@ class ForgeImporterApp(ctk.CTk):
         status_key, _ = row.status()
         if row.is_copy:
             base_text = t("value.copy_of", name=row.copy_card)
+        elif row.is_back:
+            front = self.rows.get(row.linked_front)
+            base_text = (
+                t("value.back_of", name=front.new_name or front.image_path.name)
+                if front is not None
+                else t("common.none")
+            )
         elif row.base:
             base_text = row.base.name
         else:
@@ -769,7 +794,7 @@ class ForgeImporterApp(ctk.CTk):
             f"{row.score:.0f}" if row.base else "\u2014",
             self._reason_text(row),
             row.new_name,
-            "\u2014" if (row.is_token or row.is_emblem) else row.rarity,
+            "\u2014" if (row.is_token or row.is_emblem or row.is_back) else row.rarity,
             t(status_key),
         )
 
@@ -794,10 +819,47 @@ class ForgeImporterApp(ctk.CTk):
             self._refresh_row(row)
             self._mark_copy_tokens()
 
+    def link_faces(self) -> None:
+        """Collega a mano il fronte e il retro di una carta a due lati.
+
+        L'abbinamento automatico legge il nome del file: quando non rispetta la
+        forma attesa il retro non viene riconosciuto e finisce come carta a se'.
+        Da qui si sceglie esplicitamente quale immagine e' il retro di quale
+        fronte.
+        """
+        if not any(not r.is_token and not r.is_emblem for r in self.rows.values()):
+            messagebox.showinfo(t("msg.nothing_title"), t("faces.need_rows"))
+            return
+        dialog = LinkFacesDialog(self, self._selected_rows())
+        self.wait_window(dialog)
+        for iid in dialog.changed:
+            row = self.rows.get(iid)
+            if row is not None:
+                self._refresh_row(row)
+
+    def _sync_back_links(self, rows: list[Row]) -> None:
+        """Propaga ai retro collegati la carta base del fronte scelto a mano.
+
+        Un retro non e' una carta a se': prende la base del fronte, cosi' in
+        scrittura la coppia viene trattata come le due facce della stessa carta.
+        """
+        for row in rows:
+            if not row.is_back or not row.linked_front:
+                continue
+            front = self.rows.get(row.linked_front)
+            if front is not None and front.base is not None:
+                row.base = front.base
+
     def remove_selected(self) -> None:
-        for iid in list(self.tree.selection()):
+        removed = set(self.tree.selection())
+        for iid in list(removed):
             self.rows.pop(iid, None)
             self.tree.delete(iid)
+        # Rimuovendo un fronte il suo retro resta senza collegamento: si aggiorna.
+        for row in self.rows.values():
+            if row.is_back and row.linked_front in removed:
+                row.linked_front = ""
+                self._refresh_row(row)
 
     def clear_rows(self) -> None:
         for iid in self.tree.get_children():
@@ -816,6 +878,7 @@ class ForgeImporterApp(ctk.CTk):
             return
 
         self._mark_copy_tokens()
+        self._sync_back_links(rows)
         usable = [
             r for r in rows if r.new_name.strip() and (r.base is not None or r.is_copy)
         ]
@@ -870,6 +933,7 @@ class ForgeImporterApp(ctk.CTk):
                 copy_prefix=r.copy_prefix,
                 copy_card=r.copy_card,
                 is_emblem=r.is_emblem,
+                is_back=r.is_back,
             )
             for r in usable
         ]
@@ -1009,9 +1073,10 @@ class ForgeImporterApp(ctk.CTk):
         elif kind == "analyze_done":
             self._set_busy(False)
             self._mark_copy_tokens()
-            ready = sum(
-                1 for r in self.rows.values() if r.new_name.strip() and (r.base or r.is_copy)
-            )
+            # "Ready" deve rispecchiare il colore/stato reale della riga:
+            # prima contava anche i casi "check", creando confusione proprio
+            # con token omonimi come quelli di EVA.
+            ready = sum(1 for r in self.rows.values() if r.status()[1] == "ok")
             self.status_label.configure(
                 text=t("status.analyze_done", count=len(self.rows), ready=ready),
                 text_color=COLOR_OK,
@@ -1306,6 +1371,197 @@ class CardEditor(ctk.CTkToplevel):
             self.row.reason = "reason.same_name"
         self.saved = True
         self.destroy()
+
+
+class LinkFacesDialog(ctk.CTkToplevel):
+    """Collega a mano fronte e retro di una carta a due lati.
+
+    L'abbinamento automatico si basa sul nome del file: quando il nome non
+    rispetta la forma attesa ("<NomeReale> (<NomeCustom>) <n>.ext") il retro non
+    viene riconosciuto e finisce come carta a se' stante (o viene scartato).
+    Qui l'utente sceglie esplicitamente quale immagine e' il retro di quale
+    fronte, con l'anteprima delle due immagini per riconoscerle a vista.
+    """
+
+    PREVIEW = (240, 330)
+
+    def __init__(self, master: ForgeImporterApp, selected: list[Row]) -> None:
+        super().__init__(master)
+        self.title(t("faces.title"))
+        self.geometry("840x660")
+        self.changed: set[str] = set()
+        # Riferimenti alle anteprime correnti: senza di essi Tk le scarterebbe.
+        self._images: list = []
+
+        rows = [r for r in master.rows.values() if not r.is_token and not r.is_emblem]
+        self._by_iid = {r.iid: r for r in rows}
+        self.front_map = self._labels([r for r in rows if not r.is_back])
+        self.back_map = self._labels(rows)
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(2, weight=1)
+
+        ctk.CTkLabel(
+            self, text=t("faces.hint"), anchor="w", justify="left", wraplength=790
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(14, 6))
+
+        selectors = ctk.CTkFrame(self, fg_color="transparent")
+        selectors.grid(row=1, column=0, sticky="ew", padx=16)
+        selectors.grid_columnconfigure(1, weight=1)
+        selectors.grid_columnconfigure(3, weight=1)
+
+        ctk.CTkLabel(selectors, text=t("faces.front")).grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=6
+        )
+        self.front_menu = ctk.CTkOptionMenu(
+            selectors,
+            values=list(self.front_map) or [t("common.none")],
+            width=290,
+            command=lambda _v: self._update(),
+        )
+        self.front_menu.grid(row=0, column=1, sticky="w", pady=6)
+        ctk.CTkLabel(selectors, text=t("faces.back")).grid(
+            row=0, column=2, sticky="w", padx=(16, 8), pady=6
+        )
+        self.back_menu = ctk.CTkOptionMenu(
+            selectors,
+            values=list(self.back_map) or [t("common.none")],
+            width=290,
+            command=lambda _v: self._update(),
+        )
+        self.back_menu.grid(row=0, column=3, sticky="w", pady=6)
+
+        previews = ctk.CTkFrame(self, fg_color="transparent")
+        previews.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
+        previews.grid_columnconfigure(0, weight=1)
+        previews.grid_columnconfigure(1, weight=1)
+        self.front_preview = ctk.CTkLabel(previews, text="\u2014", height=340)
+        self.front_preview.grid(row=0, column=0, padx=10, pady=6)
+        self.back_preview = ctk.CTkLabel(previews, text="\u2014", height=340)
+        self.back_preview.grid(row=0, column=1, padx=10, pady=6)
+
+        self.status_label = ctk.CTkLabel(self, text="", anchor="w")
+        self.status_label.grid(row=3, column=0, sticky="ew", padx=16)
+
+        buttons = ctk.CTkFrame(self, fg_color="transparent")
+        buttons.grid(row=4, column=0, sticky="ew", padx=16, pady=(6, 14))
+        buttons.grid_columnconfigure(0, weight=1)
+        ctk.CTkButton(
+            buttons, text=t("faces.unlink"), fg_color="#555", command=self._unlink
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(buttons, text=t("faces.link"), command=self._link).grid(
+            row=0, column=1, padx=8
+        )
+        ctk.CTkButton(
+            buttons, text=t("common.close"), fg_color="#555", command=self.destroy
+        ).grid(row=0, column=2)
+
+        self._preselect(selected)
+        self._update()
+        self.transient(master)
+        self.grab_set()
+
+    @staticmethod
+    def _labels(rows: list[Row]) -> dict[str, str]:
+        """Etichetta del menu -> iid della riga (il nome file e' unico)."""
+        out: dict[str, str] = {}
+        for row in rows:
+            name = row.new_name.strip()
+            label = f"{row.image_path.name}  \u2192  {name}" if name else row.image_path.name
+            if label in out:
+                label = f"{label}  [{row.iid}]"
+            out[label] = row.iid
+        return out
+
+    def _preselect(self, selected: list[Row]) -> None:
+        """Parte dalla riga selezionata in tabella, se ne e' stata scelta una."""
+        if not selected:
+            return
+        row = selected[0]
+        self._select(self.back_menu, self.back_map, row.iid)
+        if row.is_back and row.linked_front:
+            self._select(self.front_menu, self.front_map, row.linked_front)
+
+    @staticmethod
+    def _select(menu: ctk.CTkOptionMenu, mapping: dict[str, str], iid: str) -> None:
+        for label, value in mapping.items():
+            if value == iid:
+                menu.set(label)
+                return
+
+    def _row_of(self, menu: ctk.CTkOptionMenu, mapping: dict[str, str]) -> Row | None:
+        iid = mapping.get(menu.get())
+        return self._by_iid.get(iid) if iid else None
+
+    def _update(self) -> None:
+        front = self._row_of(self.front_menu, self.front_map)
+        back = self._row_of(self.back_menu, self.back_map)
+        self._images = []
+        self._show(self.front_preview, front)
+        self._show(self.back_preview, back)
+        if back is not None and back.is_back and back.linked_front:
+            linked = self._by_iid.get(back.linked_front)
+            name = (linked.new_name or linked.image_path.name) if linked else "\u2014"
+            self.status_label.configure(text=t("faces.status_linked", name=name))
+        else:
+            self.status_label.configure(text=t("faces.status_free"))
+
+    def _show(self, label: ctk.CTkLabel, row: Row | None) -> None:
+        photo = self._thumbnail(row.image_path) if row is not None else None
+        if photo is None:
+            label.configure(image=None, text=row.image_path.name if row else "\u2014")
+            return
+        self._images.append(photo)
+        label.configure(image=photo, text="")
+
+    def _thumbnail(self, path: Path):
+        """Miniatura dell'immagine (None se non e' leggibile)."""
+        try:
+            from PIL import Image, ImageTk
+
+            image = Image.open(path)
+            image.thumbnail(self.PREVIEW)
+            return ImageTk.PhotoImage(image)
+        except Exception:
+            return None
+
+    def _link(self) -> None:
+        front = self._row_of(self.front_menu, self.front_map)
+        back = self._row_of(self.back_menu, self.back_map)
+        if front is None or back is None or front is back:
+            messagebox.showwarning(t("faces.bad_title"), t("faces.bad_text"), parent=self)
+            return
+        if front.is_back:
+            messagebox.showwarning(t("faces.bad_title"), t("faces.front_is_back"), parent=self)
+            return
+        if front.base is None:
+            messagebox.showwarning(
+                t("faces.bad_title"), t("faces.front_no_base"), parent=self
+            )
+            return
+        if not faces_of(front.base):
+            messagebox.showwarning(
+                t("faces.bad_title"), t("faces.front_single_face"), parent=self
+            )
+            return
+        # Il retro prende la base del fronte: in scrittura la coppia viene
+        # trattata come le due facce della stessa carta.
+        back.is_back = True
+        back.linked_front = front.iid
+        back.base = front.base
+        if not back.new_name.strip():
+            back.new_name = name_from_filename(back.image_path)
+        self.changed.update({front.iid, back.iid})
+        self._update()
+
+    def _unlink(self) -> None:
+        back = self._row_of(self.back_menu, self.back_map)
+        if back is None or not back.is_back:
+            return
+        back.is_back = False
+        back.linked_front = ""
+        self.changed.add(back.iid)
+        self._update()
 
 
 class SettingsDialog(ctk.CTkToplevel):

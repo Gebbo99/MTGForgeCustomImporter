@@ -255,6 +255,14 @@ class Edition:
             1 for line in self.other_lines() if _token_line_stem(line).lower() == target
         )
 
+    def remove_other(self, filestem: str) -> None:
+        """Rimuove tutte le righe [other] che puntano a questa immagine."""
+        target = filestem.strip().lower()
+        for _name, lines in self.other_sections:
+            lines[:] = [
+                line for line in lines if _token_line_stem(line).lower() != target
+            ]
+
     def add_other(self, filestem: str, collector: int, artist: str = "") -> None:
         line = f"{collector} {filestem}"
         if artist:
@@ -278,11 +286,14 @@ class Edition:
         if self.token_lines:
             lines.append("")
             lines.append("[tokens]")
-            lines.extend(self.token_lines)
+            # Ordine alfabetico per nome token: rende stabile l'output a ogni
+            # import (le varianti d'arte restano adiacenti, in ordine di
+            # collector) invece di seguire l'ordine di importazione.
+            lines.extend(sorted(self.token_lines, key=_token_sort_key))
         for name, section_lines in self.other_sections:
             lines.append("")
             lines.append(f"[{name}]")
-            lines.extend(section_lines)
+            lines.extend(sorted(section_lines, key=_token_sort_key))
         return "\n".join(lines).rstrip() + "\n"
 
     def save(self) -> None:
@@ -346,6 +357,17 @@ def _token_line_stem(line: str) -> str:
     """Nome dello script (filestem) da una riga della sezione [tokens]."""
     match = _TOKEN_LINE_RE.match(line)
     return match.group(2) if match else ""
+
+
+def _token_sort_key(line: str) -> str:
+    """Chiave per ordinare alfabeticamente le righe delle sezioni token.
+
+    Si ordina per nome dello script; a parita' di script l'ordine di
+    scrittura viene mantenuto (l'ordinamento e' stabile), cosi' le varianti
+    d'arte dello stesso token restano adiacenti e nell'ordine dei collector.
+    """
+    match = _TOKEN_LINE_RE.match(line)
+    return (match.group(2) if match else line).lower()
 
 
 def _script_name(path: Path) -> str:
@@ -527,6 +549,9 @@ class ImportItem:
     copy_card: str = ""
     # Emblema di un Planeswalker: solo immagine, registrata in [other].
     is_emblem: bool = False
+    # Retro di una carta multi-faccia collegato a mano dall'utente: la base e'
+    # gia' quella del fronte, quindi non serve riconoscerlo dal nome del file.
+    is_back: bool = False
 
 
 @dataclass
@@ -777,6 +802,14 @@ class Importer:
             # verrebbe salvato con gli spazi al posto del separatore.
             image_name = display.split(" // ")[0].strip() if faces else display
 
+            # Variante con cui questa importazione registra il re-skin. Serve
+            # anche a riconoscere come superate le righe di un'importazione
+            # precedente: quelle oltre la prima arte hanno solo ${"variant":
+            # ...} e quindi un nome mostrato pari al nome della carta base, per
+            # cui non venivano individuate e restavano nell'edizione (facendo
+            # slittare gli indici d'arte e rompendo le immagini in Forge).
+            active_variant = variant_name(flavor_name, code) if flavor_name else ""
+
             if art_total == 1:
                 # Una sola immagine con questo nome: re-import idempotente. Se la
                 # carta esiste gia' la riga viene aggiornata e l'immagine riusata,
@@ -788,7 +821,13 @@ class Importer:
                     else edition.next_collector()
                 )
                 self._drop_stale_cards(
-                    edition, pics_target, pre_existing, display, {base_name, row_name}, faces
+                    edition,
+                    pics_target,
+                    pre_existing,
+                    display,
+                    {base_name, row_name},
+                    faces,
+                    active_variant,
                 )
                 self._remove_legacy_front_images(pics_target, display, image_name)
                 self._remove_numbered_variants(pics_target, image_name)
@@ -815,7 +854,13 @@ class Importer:
                 # diventa una variante (arte) della stessa carta.
                 if art_seen[key] == 1:
                     self._drop_stale_cards(
-                        edition, pics_target, pre_existing, display, {base_name, row_name}, faces
+                        edition,
+                        pics_target,
+                        pre_existing,
+                        display,
+                        {base_name, row_name},
+                        faces,
+                        active_variant,
                     )
                     self._remove_legacy_front_images(pics_target, display, image_name)
                     self._ensure_numbered(pics_target, image_name)
@@ -837,7 +882,7 @@ class Importer:
                 row_variant = ""
                 if flavor_name and art_index > 1:
                     row_flavor = ""
-                    row_variant = variant_name(flavor_name, code)
+                    row_variant = active_variant
                 edition.add_card(
                     row_name,
                     item.rarity,
@@ -881,10 +926,19 @@ class Importer:
         reale della faccia posteriore ("Explore the Vastlands"): qui viene
         riconosciuto e raccolto per carta base, cosi' non finisce nel ciclo
         normale (dove verrebbe preso per una variante a se' stante).
+
+        Un retro collegato a mano dall'utente (is_back) non passa dal nome del
+        file: la base e' gia' quella del fronte scelto, quindi si usa quella.
         """
         normal: list[ImportItem] = []
         backs: dict[str, list[ImportItem]] = {}
         for item in items:
+            if item.is_back:
+                if item.base is not None:
+                    backs.setdefault(_face_key(item.base), []).append(item)
+                else:
+                    normal.append(item)
+                continue
             lookup = self._face_lookup(item)
             if (
                 lookup is not None
@@ -960,7 +1014,11 @@ class Importer:
 
     @staticmethod
     def _stale_cards(
-        entries: list[EditionEntry], display: str, row_names: set[str], faces: list[str]
+        entries: list[EditionEntry],
+        display: str,
+        row_names: set[str],
+        faces: list[str],
+        variant: str = "",
     ) -> list[EditionEntry]:
         """Righe superate da un import precedente della stessa carta mostrata.
 
@@ -975,11 +1033,17 @@ class Importer:
         ``row_names`` elenca i nomi carta base ammessi: quello con cui Forge
         registra la carta adesso e quello usato dalle versioni precedenti.
 
+        ``variant`` e' la variante con cui si registra adesso il re-skin: le
+        righe oltre la prima arte di un re-skin hanno solo ``${"variant": ...}``
+        e il loro nome mostrato resta quello della carta base, quindi vanno
+        riconosciute dal nome della variante per non restare nell'edizione.
+
         Si cerca solo fra le righe indicate (quelle presenti prima dell'import):
         le righe scritte adesso non sono mai superate.
         """
         target = display.strip().lower()
         row_targets = {name.strip().lower() for name in row_names if name.strip()}
+        variant = variant.strip()
         # Identita' del re-skin: la faccia anteriore del nome mostrato, cioe' il
         # nome custom del fronte ("FronteCustom // RetroCustom" -> "FronteCustom").
         front = display.split(" // ")[0].strip().lower()
@@ -990,6 +1054,7 @@ class Importer:
                 name == target
                 or (faces and name.split(" // ")[0].strip() == front)
                 or (faces and entry.name.strip().lower() in row_targets)
+                or (variant and entry.variant.strip() == variant)
             ):
                 stale.append(entry)
         return stale
@@ -1002,11 +1067,19 @@ class Importer:
         display: str,
         row_names: set[str],
         faces: list[str],
+        variant: str = "",
     ) -> None:
         """Rimuove le righe superate della carta e le immagini che usavano."""
         target = display.strip().lower()
-        for entry in self._stale_cards(pre_existing, display, row_names, faces):
+        for entry in self._stale_cards(
+            pre_existing, display, row_names, faces, variant
+        ):
             edition.remove_card(entry)
+            if entry.variant.strip():
+                # Riga-variante superata: le immagini che usava portano il nome
+                # mostrato, cioe' lo stesso che riscrive adesso l'importazione,
+                # quindi non vanno cancellate col nome della carta base.
+                continue
             if entry.card_name.strip().lower() != target:
                 self._remove_card_images(pics_target, entry.card_name)
 
@@ -1154,6 +1227,26 @@ class Importer:
                 by_name[key] = filestem
             stems[index] = filestem
             totals[filestem.lower()] = totals.get(filestem.lower(), 0) + 1
+
+        # Token-copia (Eternalize/Embalm): piu' arti della stessa copia
+        # diventano righe [other] con collector propri, una per arte.
+        copy_of: dict[int, tuple[str, str]] = {}
+        copy_totals: dict[str, int] = {}
+        for index, item in enumerate(items):
+            name = item.new_name.strip()
+            if not name:
+                continue
+            copy: tuple[str, str] | None = None
+            if item.is_copy and item.copy_prefix:
+                copy = (item.copy_prefix, item.copy_card or name)
+            if copy is None:
+                copy = copy_mechanics.get(name.lower())
+            if copy is None:
+                continue
+            copy_of[index] = copy
+            stem = f"{copy[0]}_{forge_image_slug(copy[1])}"
+            copy_totals[stem] = copy_totals.get(stem, 0) + 1
+
         art_seen: dict[str, int] = {}
 
         for index, item in enumerate(items):
@@ -1162,13 +1255,35 @@ class Importer:
                 report.skipped += 1
                 report.log(t("gen.skipped_token_name", name=item.image_path.name))
                 continue
-            copy: tuple[str, str] | None = None
-            if item.is_copy and item.copy_prefix:
-                copy = (item.copy_prefix, item.copy_card or name)
-            if copy is None:
-                copy = copy_mechanics.get(name.lower())
+            copy = copy_of.get(index)
             if copy is not None:
-                self._place_copy_image(item, edition, pics_target, copy, options, report)
+                filestem = f"{copy[0]}_{forge_image_slug(copy[1])}"
+                art_total = copy_totals.get(filestem, 1)
+                collector: int | None = None
+                art_index = 0
+                if art_total > 1:
+                    # Piu' art dello stesso token-copia: ognuna diventa una
+                    # variante con una riga [other] e un collector propri.
+                    art_seen[filestem] = art_seen.get(filestem, 0) + 1
+                    art_index = art_seen[filestem]
+                    if art_index == 1:
+                        # Nuovo lotto di art: le righe e le immagini di un
+                        # import precedente vengono sostituite.
+                        edition.remove_other(filestem)
+                        self._remove_token_variants(pics_target, filestem)
+                    collector = edition.next_other_collector()
+                    edition.add_other(filestem, collector, item.artist)
+                self._place_copy_image(
+                    item,
+                    edition,
+                    pics_target,
+                    copy,
+                    options,
+                    report,
+                    collector=collector,
+                    art_index=art_index,
+                    art_total=art_total,
+                )
                 continue
             if not item.base:
                 report.skipped += 1
@@ -1247,24 +1362,42 @@ class Importer:
         copy: tuple[str, str],
         options: ImportOptions,
         report: ImportReport,
+        collector: int | None = None,
+        art_index: int = 0,
+        art_total: int = 0,
     ) -> None:
         """Registra l'immagine di un token-copia (Eternalize/Embalm).
 
         Questi token non hanno uno script: Forge crea una copia della carta e
         la disegna con la image key "eternalize_<nome>"/"embalm_<nome>", che si
         risolve nelle righe della sezione [other] dell'edizione.
+
+        Piu' arti dello stesso token-copia ricevono ognuna un collector proprio
+        (righe [other] omonime): Forge ne sceglie una a caso, come per i token.
         """
         prefix, card_name = copy
         filestem = f"{prefix}_{forge_image_slug(card_name)}"
-        if edition.other_count(filestem):
-            collector = _other_collector_of(edition, filestem)
-        else:
-            collector = edition.next_other_collector()
-            edition.add_other(filestem, collector, item.artist)
+        if collector is None:
+            if edition.other_count(filestem):
+                collector = _other_collector_of(edition, filestem)
+            else:
+                collector = edition.next_other_collector()
+                edition.add_other(filestem, collector, item.artist)
         item.image_dest = self._place_token_image(
             item, pics_target, collector, filestem, options, report
         )
-        item.notes.append(t("gen.copy_token", prefix=prefix, card=card_name))
+        if art_total > 1:
+            item.notes.append(
+                t(
+                    "gen.copy_token_variant",
+                    prefix=prefix,
+                    card=card_name,
+                    index=art_index,
+                    total=art_total,
+                )
+            )
+        else:
+            item.notes.append(t("gen.copy_token", prefix=prefix, card=card_name))
         report.tokens += 1
         report.log(t("gen.copy_token_line", prefix=prefix, card=card_name, collector=collector))
 

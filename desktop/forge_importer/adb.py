@@ -327,6 +327,18 @@ class PhoneTarget:
             if pushed:
                 messages.append(t("push.tokens", count=pushed))
 
+        # Gli override delle carte (es. carte che creano i token custom) vivono
+        # in ``custom/cards``: senza di essi Forge usa gli script ufficiali e i
+        # token custom non compaiono. La cartella e' annidata (a/, b/, ...),
+        # quindi la copiamo ricorsivamente nella sua destinazione.
+        card_scripts = custom_dir / "cards"
+        if card_scripts.is_dir():
+            self.adb.mkdirs(self.forge.custom_dir)
+            self.adb.push(card_scripts, f"{self.forge.custom_dir}/")
+            count = sum(1 for _ in card_scripts.rglob("*.txt"))
+            if count:
+                messages.append(t("push.cards", count=count))
+
         images = cache_dir / "pics" / "cards" / code
         if images.is_dir():
             count = self._push_images(images, self.forge.pics_dir, code, _numbered_key)
