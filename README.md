@@ -1,3 +1,4 @@
+<meta name="google-site-verification" content="655a0b1ee334c602" />
 # Forge Custom Card Importer
 
 External companion tool for **MTG Forge**: it imports custom cards (re-skins:
