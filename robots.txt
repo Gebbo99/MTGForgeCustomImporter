@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://gebbo99.github.io/MTGForgeCustomImporter/sitemap.xml
